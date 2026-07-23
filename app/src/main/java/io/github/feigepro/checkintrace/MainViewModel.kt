@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.feigepro.checkintrace.data.CheckInResult
 import io.github.feigepro.checkintrace.data.GameCatalog
 import io.github.feigepro.checkintrace.data.ProviderType
+import io.github.feigepro.checkintrace.logging.DevLogFormatter
 import io.github.feigepro.checkintrace.logging.DevLogger
 import io.github.feigepro.checkintrace.provider.CheckInRequestPacer
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoProvider
@@ -171,9 +172,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshLogs() {
         _state.value = _state.value.copy(
-            output = DevLogger.snapshot().takeLast(100).map {
-                "${it.timestamp}  ${it.level}  ${it.scope}  ${it.message}"
-            },
+            output = DevLogger.snapshot().takeLast(100).map(DevLogFormatter::format),
         )
     }
 
