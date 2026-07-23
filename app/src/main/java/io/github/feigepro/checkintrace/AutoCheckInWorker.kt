@@ -19,6 +19,7 @@ import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoProvider
 import io.github.feigepro.checkintrace.provider.skland.SklandProvider
 import io.github.feigepro.checkintrace.security.CredentialRepository
 import io.github.feigepro.checkintrace.security.EncryptedCredentialStore
+import java.io.IOException
 import java.time.Duration
 import java.time.ZonedDateTime
 import java.util.concurrent.TimeUnit
@@ -69,11 +70,16 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
 
                 val validation = provider.validateCredential()
                 if (validation.isFailure) {
-                    val message = safeMessage(validation.exceptionOrNull()?.message ?: "登录验证失败")
+                    val error = validation.exceptionOrNull()
+                    val message = safeMessage(error?.message ?: "登录验证失败")
                     lines += "${providerName(type)}：登录验证失败（$message）"
                     DevLogger.warn("自动任务", "${providerName(type)} 登录验证失败，本次跳过", taskId)
                     hasFailures = true
-                    requiresAction = true
+                    if (isTransientError(error)) {
+                        hasRetryableFailure = true
+                    } else {
+                        requiresAction = true
+                    }
                     continue
                 }
 
@@ -82,11 +88,16 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                     if (stopProvider) break
                     val roleResult = provider.getRoles(game)
                     if (roleResult.isFailure) {
-                        val message = safeMessage(roleResult.exceptionOrNull()?.message ?: "角色读取失败")
+                        val error = roleResult.exceptionOrNull()
+                        val message = safeMessage(error?.message ?: "角色读取失败")
                         lines += "${game.displayName}：读取角色失败（$message）"
                         DevLogger.error("自动任务/${game.displayName}", message, taskId)
                         hasFailures = true
-                        hasRetryableFailure = true
+                        if (isTransientError(error)) {
+                            hasRetryableFailure = true
+                        } else {
+                            requiresAction = true
+                        }
                         continue
                     }
 
@@ -178,6 +189,14 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
     }
 
     private fun safeMessage(message: String): String = LogRedactor.redact(message)
+
+    private fun isTransientError(error: Throwable?): Boolean {
+        if (error is IOException) return true
+        val message = error?.message.orEmpty()
+        return message.contains("timeout", ignoreCase = true) ||
+            message.contains("timed out", ignoreCase = true) ||
+            Regex("HTTP (429|5\\d\\d)").containsMatchIn(message)
+    }
 
     private fun providerName(type: ProviderType): String =
         if (type == ProviderType.MIHOYO) "米游社" else "森空岛"
