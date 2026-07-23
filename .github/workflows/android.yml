@@ -30,8 +30,8 @@ jobs:
       - name: Grant Gradle wrapper execute permission
         run: chmod +x ./gradlew
 
-      - name: Test and build Debug APK
-        run: ./gradlew testDebugUnitTest assembleDebug
+      - name: Test and build Debug and Release APKs
+        run: ./gradlew testDebugUnitTest assembleDebug assembleRelease
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
