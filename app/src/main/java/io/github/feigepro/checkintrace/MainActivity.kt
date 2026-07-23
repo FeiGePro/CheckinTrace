@@ -1,9 +1,12 @@
 package io.github.feigepro.checkintrace
 
+import android.Manifest
 import android.app.Activity
 import android.app.TimePickerDialog
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -37,7 +40,21 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AutoCheckInScheduler.ensureScheduled(applicationContext)
+        requestNotificationPermissionOnce()
         setContent { SignInTheme { MainScreen() } }
+    }
+
+    private fun requestNotificationPermissionOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val preferences = getSharedPreferences("ui_settings", 0)
+        if (
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED ||
+            preferences.getBoolean("notification_permission_requested", false)
+        ) {
+            return
+        }
+        preferences.edit().putBoolean("notification_permission_requested", true).apply()
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2303)
     }
 }
 
@@ -73,6 +90,12 @@ private fun MainScreen(model: MainViewModel = viewModel()) {
                             true,
                         ).show()
                     },
+                )
+            }
+            item {
+                AutoCheckInStatusCard(
+                    snapshot = state.autoCheckInSnapshot,
+                    onRefresh = model::refreshAutoCheckInStatus,
                 )
             }
             item {
