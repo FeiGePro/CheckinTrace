@@ -28,6 +28,7 @@ data class MainUiState(
     val sklandLoggedIn: Boolean = false,
     val scheduleHour: Int = 8,
     val scheduleMinute: Int = 30,
+    val autoCheckInSnapshot: AutoCheckInSnapshot? = null,
     val qrSession: MihoyoQrSession? = null,
     val qrStatus: String? = null,
     val busy: Boolean = false,
@@ -36,6 +37,7 @@ data class MainUiState(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = CredentialRepository(EncryptedCredentialStore(application))
+    private val autoCheckInStatusStore = AutoCheckInStatusStore(application)
     private val qrClient = MihoyoQrLoginClient()
     private val preferences = application.getSharedPreferences("ui_settings", 0)
     private val initialSchedule = AutoCheckInScheduler.currentTime(application)
@@ -47,6 +49,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             sklandLoggedIn = repository.loadSklandToken(DEFAULT_ACCOUNT) != null,
             scheduleHour = initialSchedule.hour,
             scheduleMinute = initialSchedule.minute,
+            autoCheckInSnapshot = autoCheckInStatusStore.load(),
         ),
     )
     val state: StateFlow<MainUiState> = _state.asStateFlow()
@@ -62,6 +65,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateSchedule(hour: Int, minute: Int) {
         AutoCheckInScheduler.updateTime(getApplication(), hour, minute)
         _state.value = _state.value.copy(scheduleHour = hour, scheduleMinute = minute)
+    }
+
+    fun refreshAutoCheckInStatus() {
+        _state.value = _state.value.copy(autoCheckInSnapshot = autoCheckInStatusStore.load())
     }
 
     fun beginMihoyoLogin() {
