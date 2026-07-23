@@ -5,6 +5,22 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+val releaseSigningRequested = System.getenv("CHECKINTRACE_SIGN_RELEASE") == "true"
+val releaseKeystorePath = System.getenv("CHECKINTRACE_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+val releaseKeystorePassword = System.getenv("CHECKINTRACE_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() }
+val releaseKeyAlias = System.getenv("CHECKINTRACE_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+val releaseKeyPassword = System.getenv("CHECKINTRACE_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+val releaseSigningConfigured = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { it != null }
+
+if (releaseSigningRequested && !releaseSigningConfigured) {
+    error("Release signing requested, but one or more CHECKINTRACE signing environment variables are missing")
+}
+
 android {
     namespace = "io.github.feigepro.checkintrace"
     compileSdk = 35
@@ -13,10 +29,21 @@ android {
         applicationId = "io.github.feigepro.checkintrace"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.2.1"
+        versionCode = 13
+        versionName = "0.2.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(requireNotNull(releaseKeystorePath))
+                storePassword = requireNotNull(releaseKeystorePassword)
+                keyAlias = requireNotNull(releaseKeyAlias)
+                keyPassword = requireNotNull(releaseKeyPassword)
+            }
+        }
     }
 
     buildTypes {
@@ -30,6 +57,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
