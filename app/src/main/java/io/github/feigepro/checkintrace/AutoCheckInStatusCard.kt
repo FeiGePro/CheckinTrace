@@ -83,12 +83,8 @@ internal fun AutoCheckInStatusCard(
 @Composable
 private fun runStateColor(state: AutoCheckInRunState) = when (state) {
     AutoCheckInRunState.SUCCESS -> MaterialTheme.colorScheme.primary
-    AutoCheckInRunState.RUNNING,
-    AutoCheckInRunState.RETRY_SCHEDULED,
-    -> MaterialTheme.colorScheme.tertiary
-    AutoCheckInRunState.FAILED,
-    AutoCheckInRunState.ACTION_REQUIRED,
-    -> MaterialTheme.colorScheme.error
+    AutoCheckInRunState.RUNNING, AutoCheckInRunState.RETRY_SCHEDULED -> MaterialTheme.colorScheme.tertiary
+    AutoCheckInRunState.FAILED, AutoCheckInRunState.ACTION_REQUIRED -> MaterialTheme.colorScheme.error
 }
 
 private fun runStateLabel(state: AutoCheckInRunState): String = when (state) {
