@@ -53,6 +53,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val sklandQrClient = SklandQrLoginClient()
     private val sklandApi = SklandApi()
     private val preferences = application.getSharedPreferences("ui_settings", 0)
+    private val pendingLoginStore = PendingLoginSessionStore(application)
+    private val restoredSklandQr = pendingLoginStore.loadSkland()
     private val initialSchedule = AutoCheckInScheduler.currentTime(application)
     private val _state = MutableStateFlow(
         MainUiState(
@@ -63,9 +65,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             scheduleHour = initialSchedule.hour,
             scheduleMinute = initialSchedule.minute,
             autoCheckInSnapshot = autoCheckInStatusStore.load(),
+            sklandQrSession = restoredSklandQr?.session,
+            sklandQrStatus = restoredSklandQr?.let { "已恢复原森空岛二维码，正在继续等待扫码确认……" },
         ),
     )
     val state: StateFlow<MainUiState> = _state.asStateFlow()
+
+    init {
+        restoredSklandQr?.let { pending ->
+            viewModelScope.launch {
+                pollSklandQr(
+                    session = pending.session,
+                    taskId = DevLogger.newTaskId(),
+                    createdAtEpochMillis = pending.createdAtEpochMillis,
+                )
+            }
+        }
+    }
 
     fun toggleGame(id: String, checked: Boolean) {
         val selected = _state.value.selected.toMutableSet().apply {
@@ -96,7 +112,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _state.value = _state.value.copy(
                 busy = true,
-                qrStatus = "正在创建 Android GameToken 登录二维码……",
+                qrStatus = "正在创建 GameToken 登录二维码……",
             )
             val session = qrClient.createQr().getOrElse {
                 _state.value = _state.value.copy(busy = false, qrStatus = "二维码创建失败：${it.message}")
@@ -105,7 +121,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.value = _state.value.copy(
                 busy = false,
                 qrSession = session,
-                qrStatus = "请使用米游社 App 扫码并确认。登录成功后会把同一设备注册为 Android 米游社设备。",
+                qrStatus = "请使用米游社 App 扫码。若确认时出现 decode err / unexpected end of JSON input，这是当前米游社 GameToken 确认接口的上游兼容故障，请改用短信验证码备用登录。",
             )
             pollMihoyoQr(session)
         }
@@ -121,7 +137,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             when (val result = qrClient.queryQr(session).getOrElse { MihoyoQrState.Failed(it.message ?: "查询失败") }) {
                 MihoyoQrState.Waiting -> _state.value = _state.value.copy(qrStatus = "等待扫码……")
                 MihoyoQrState.Scanned -> _state.value = _state.value.copy(
-                    qrStatus = "已扫码，请在米游社 App 中确认登录",
+                    qrStatus = "已扫码，请在米游社中确认。若米游社提示 JSON 截断，这是平台当前 GameToken 确认链路故障，签迹无法在二维码生成端修复。",
                 )
                 is MihoyoQrState.Confirmed -> {
                     _state.value = _state.value.copy(qrStatus = "正在交换凭证并注册 Android 设备……")
@@ -144,7 +160,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             delay(2_000)
         }
-        _state.value = _state.value.copy(qrSession = null, qrStatus = "二维码已超时，请重新获取")
+        _state.value = _state.value.copy(
+            qrSession = null,
+            qrStatus = "二维码未能完成确认。当前 GameToken 二维码在米游社确认端存在已知 JSON 截断问题，请使用短信验证码备用登录。",
+        )
     }
 
     fun beginSklandLogin() {
@@ -162,34 +181,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 return@launch
             }
+            val createdAt = System.currentTimeMillis()
+            pendingLoginStore.saveSkland(session, createdAt)
             _state.value = _state.value.copy(
                 busy = false,
                 sklandQrSession = session,
-                sklandQrStatus = "请使用森空岛 App 扫码并确认登录",
+                sklandQrStatus = "请截图后使用森空岛 App 扫码；返回签迹时会恢复同一张二维码并继续轮询",
             )
-            pollSklandQr(session, taskId)
+            pollSklandQr(session, taskId, createdAt)
         }
     }
 
     fun cancelSklandLogin() {
+        pendingLoginStore.clearSkland()
         _state.value = _state.value.copy(sklandQrSession = null, sklandQrStatus = null)
     }
 
-    private suspend fun pollSklandQr(session: SklandQrSession, taskId: String) {
-        repeat(50) {
+    private suspend fun pollSklandQr(
+        session: SklandQrSession,
+        taskId: String,
+        createdAtEpochMillis: Long,
+    ) {
+        while (System.currentTimeMillis() - createdAtEpochMillis < PendingLoginSessionStore.SKLAND_QR_TTL_MILLIS) {
             if (_state.value.sklandQrSession?.scanId != session.scanId) return
             delay(2_000)
-            when (val result = sklandQrClient.poll(session, taskId).getOrElse {
+            val result = sklandQrClient.poll(session, taskId).getOrElse { error ->
                 _state.value = _state.value.copy(
-                    sklandQrSession = null,
-                    sklandQrStatus = "登录轮询失败：${it.message}",
+                    sklandQrStatus = "二维码仍已保留；轮询暂时失败，正在自动继续（${error.message ?: "网络异常"}）",
                 )
-                return
-            }) {
+                continue
+            }
+            when (result) {
                 SklandQrPollResult.Waiting -> _state.value = _state.value.copy(
-                    sklandQrStatus = "等待扫码并确认……",
+                    sklandQrStatus = "等待扫码并确认……截图、切换应用或页面重建都不会更换二维码",
                 )
                 is SklandQrPollResult.Confirmed -> {
+                    pendingLoginStore.clearSkland()
                     _state.value = _state.value.copy(
                         sklandQrStatus = "已确认，正在验证并安全保存森空岛凭证……",
                     )
@@ -211,6 +238,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        pendingLoginStore.clearSkland()
         _state.value = _state.value.copy(
             sklandQrSession = null,
             sklandQrStatus = "二维码已过期，请重新获取",
