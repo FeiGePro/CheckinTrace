@@ -1,17 +1,13 @@
 package io.github.feigepro.checkintrace
 
 import android.Manifest
-import android.app.Activity
 import android.app.TimePickerDialog
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -65,11 +61,7 @@ private fun MainScreen(model: MainViewModel = viewModel()) {
     var showAvailable by rememberSaveable { mutableStateOf(false) }
     val selected = GameCatalog.builtIn.filter { it.id in state.selected }
     val available = GameCatalog.builtIn.filter { it.id !in state.selected }
-    val sklandLogin = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            result.data?.getStringExtra(SklandLoginActivity.EXTRA_TOKEN)?.let(model::saveSklandToken)
-        }
-    }
+    val loginEnabled = !state.busy && state.qrSession == null && state.sklandQrSession == null
 
     Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
         LazyColumn(
@@ -102,36 +94,38 @@ private fun MainScreen(model: MainViewModel = viewModel()) {
                 AccountPanel(
                     state.mihoyoLoggedIn,
                     state.sklandLoggedIn,
-                    !state.busy,
+                    loginEnabled,
                     model::beginMihoyoLogin,
-                ) { sklandLogin.launch(Intent(context, SklandLoginActivity::class.java)) }
+                    model::beginSklandLogin,
+                )
             }
             state.qrSession?.let { session ->
                 item {
-                    val bitmap = remember(session.url) { qrBitmap(session.url) }
-                    Card(
-                        Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(24.dp),
-                    ) {
-                        Column(
-                            Modifier.fillMaxWidth().padding(18.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Text(state.qrStatus.orEmpty(), fontWeight = FontWeight.SemiBold)
-                            Image(bitmap.asImageBitmap(), "米游社登录二维码", Modifier.size(216.dp))
-                            Text(
-                                "截图后可在米游社扫一扫中从相册识别",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            TextButton(onClick = model::cancelMihoyoLogin) { Text("取消登录") }
-                        }
-                    }
+                    LoginQrCard(
+                        status = state.qrStatus.orEmpty(),
+                        content = session.url,
+                        contentDescription = "米游社登录二维码",
+                        hint = "截图后可在米游社扫一扫中从相册识别",
+                        onCancel = model::cancelMihoyoLogin,
+                    )
                 }
             }
             if (state.qrSession == null && state.qrStatus != null) {
                 item { StatusMessage(state.qrStatus.orEmpty()) }
+            }
+            state.sklandQrSession?.let { session ->
+                item {
+                    LoginQrCard(
+                        status = state.sklandQrStatus.orEmpty(),
+                        content = session.qrContent,
+                        contentDescription = "森空岛登录二维码",
+                        hint = "请使用森空岛 App 扫码并确认；同一台手机可截图后从扫码页相册识别",
+                        onCancel = model::cancelSklandLogin,
+                    )
+                }
+            }
+            if (state.sklandQrSession == null && state.sklandQrStatus != null) {
+                item { StatusMessage(state.sklandQrStatus.orEmpty()) }
             }
             item {
                 GamePanel(
@@ -266,6 +260,36 @@ private fun AccountRow(title: String, loggedIn: Boolean, enabled: Boolean, onLog
             shape = RoundedCornerShape(14.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         ) { Text(if (loggedIn) "重新登录" else "登录") }
+    }
+}
+
+@Composable
+private fun LoginQrCard(
+    status: String,
+    content: String,
+    contentDescription: String,
+    hint: String,
+    onCancel: () -> Unit,
+) {
+    val bitmap = remember(content) { qrBitmap(content) }
+    Card(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(status, fontWeight = FontWeight.SemiBold)
+            Image(bitmap.asImageBitmap(), contentDescription, Modifier.size(216.dp))
+            Text(
+                hint,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(onClick = onCancel) { Text("取消登录") }
+        }
     }
 }
 
