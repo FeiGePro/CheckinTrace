@@ -2,12 +2,14 @@ package io.github.feigepro.checkintrace
 
 import android.Manifest
 import android.app.TimePickerDialog
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,7 +26,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import io.github.feigepro.checkintrace.data.GameCatalog
@@ -33,11 +34,18 @@ import io.github.feigepro.checkintrace.data.ProviderType
 import io.github.feigepro.checkintrace.ui.theme.SignInTheme
 
 class MainActivity : ComponentActivity() {
+    private val model by viewModels<MainViewModel>()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AutoCheckInScheduler.ensureScheduled(applicationContext)
         requestNotificationPermissionOnce()
-        setContent { SignInTheme { MainScreen() } }
+        setContent { SignInTheme { MainScreen(model) } }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        model.refreshLoginStates()
     }
 
     private fun requestNotificationPermissionOnce() {
@@ -55,7 +63,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun MainScreen(model: MainViewModel = viewModel()) {
+private fun MainScreen(model: MainViewModel) {
     val state by model.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var showAvailable by rememberSaveable { mutableStateOf(false) }
@@ -92,11 +100,14 @@ private fun MainScreen(model: MainViewModel = viewModel()) {
             }
             item {
                 AccountPanel(
-                    state.mihoyoLoggedIn,
-                    state.sklandLoggedIn,
-                    loginEnabled,
-                    model::beginMihoyoLogin,
-                    model::beginSklandLogin,
+                    mihoyoLoggedIn = state.mihoyoLoggedIn,
+                    sklandLoggedIn = state.sklandLoggedIn,
+                    enabled = loginEnabled,
+                    onMihoyoQrLogin = model::beginMihoyoLogin,
+                    onMihoyoSmsLogin = {
+                        context.startActivity(Intent(context, MihoyoCaptchaLoginActivity::class.java))
+                    },
+                    onSklandLogin = model::beginSklandLogin,
                 )
             }
             state.qrSession?.let { session ->
@@ -105,7 +116,7 @@ private fun MainScreen(model: MainViewModel = viewModel()) {
                         status = state.qrStatus.orEmpty(),
                         content = session.url,
                         contentDescription = "米游社登录二维码",
-                        hint = "截图后可在米游社扫一扫中从相册识别",
+                        hint = "请使用米游社 App 扫码并确认；同一台手机可截图后从相册识别",
                         onCancel = model::cancelMihoyoLogin,
                     )
                 }
@@ -140,7 +151,7 @@ private fun MainScreen(model: MainViewModel = viewModel()) {
             item {
                 Button(
                     onClick = model::runSelectedCheckIns,
-                    enabled = !state.busy && state.selected.isNotEmpty(),
+                    enabled = loginEnabled && state.selected.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth().height(54.dp),
                     shape = RoundedCornerShape(18.dp),
                 ) {
@@ -220,14 +231,55 @@ private fun AccountPanel(
     mihoyoLoggedIn: Boolean,
     sklandLoggedIn: Boolean,
     enabled: Boolean,
-    onMihoyoLogin: () -> Unit,
+    onMihoyoQrLogin: () -> Unit,
+    onMihoyoSmsLogin: () -> Unit,
     onSklandLogin: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         Column {
-            AccountRow("米游社", mihoyoLoggedIn, enabled, onMihoyoLogin)
+            MihoyoAccountRow(
+                loggedIn = mihoyoLoggedIn,
+                enabled = enabled,
+                onQrLogin = onMihoyoQrLogin,
+                onSmsLogin = onMihoyoSmsLogin,
+            )
             HorizontalDivider(Modifier.padding(horizontal = 16.dp))
             AccountRow("森空岛", sklandLoggedIn, enabled, onSklandLogin)
+        }
+    }
+}
+
+@Composable
+private fun MihoyoAccountRow(
+    loggedIn: Boolean,
+    enabled: Boolean,
+    onQrLogin: () -> Unit,
+    onSmsLogin: () -> Unit,
+) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        AccountIdentity("米游社", loggedIn)
+        Text(
+            "二维码为主要登录方式；短信验证码作为备用。两种方式共用本机 Android 设备身份。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+        ) {
+            OutlinedButton(
+                onClick = onSmsLogin,
+                enabled = enabled,
+                shape = RoundedCornerShape(14.dp),
+            ) { Text("短信验证码") }
+            Button(
+                onClick = onQrLogin,
+                enabled = enabled,
+                shape = RoundedCornerShape(14.dp),
+            ) { Text(if (loggedIn) "重新扫码" else "二维码登录") }
         }
     }
 }
@@ -239,27 +291,32 @@ private fun AccountRow(title: String, loggedIn: Boolean, enabled: Boolean, onLog
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                Surface(
-                    modifier = Modifier.size(8.dp),
-                    shape = RoundedCornerShape(50),
-                    color = if (loggedIn) Color(0xFF28A66A) else MaterialTheme.colorScheme.outline,
-                ) {}
-                Text(
-                    if (loggedIn) "已连接" else "尚未登录",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
+        AccountIdentity(title, loggedIn, Modifier.weight(1f))
         OutlinedButton(
             onClick = onLogin,
             enabled = enabled,
             shape = RoundedCornerShape(14.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         ) { Text(if (loggedIn) "重新登录" else "登录") }
+    }
+}
+
+@Composable
+private fun AccountIdentity(title: String, loggedIn: Boolean, modifier: Modifier = Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            Surface(
+                modifier = Modifier.size(8.dp),
+                shape = RoundedCornerShape(50),
+                color = if (loggedIn) Color(0xFF28A66A) else MaterialTheme.colorScheme.outline,
+            ) {}
+            Text(
+                if (loggedIn) "已连接" else "尚未登录",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -272,10 +329,7 @@ private fun LoginQrCard(
     onCancel: () -> Unit,
 ) {
     val bitmap = remember(content) { qrBitmap(content) }
-    Card(
-        Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-    ) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         Column(
             Modifier.fillMaxWidth().padding(18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -341,7 +395,7 @@ private fun GamePanel(
             if (available.isNotEmpty()) {
                 HorizontalDivider()
                 TextButton(onClick = onToggleAvailable, modifier = Modifier.fillMaxWidth()) {
-                    Text(if (showAvailable) "收起可选游戏" else "添加游戏（" + available.size + "）")
+                    Text(if (showAvailable) "收起可选游戏" else "添加游戏（${available.size}）")
                 }
                 if (showAvailable) GameGrid(available, false, onAdd)
             }
