@@ -112,7 +112,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _state.value = _state.value.copy(
                 busy = true,
-                qrStatus = "正在创建 GameToken 登录二维码……",
+                qrStatus = "正在创建米游社通行证二维码……",
             )
             val session = qrClient.createQr().getOrElse {
                 _state.value = _state.value.copy(busy = false, qrStatus = "二维码创建失败：${it.message}")
@@ -121,7 +121,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.value = _state.value.copy(
                 busy = false,
                 qrSession = session,
-                qrStatus = "请使用米游社 App 扫码。若确认时出现 decode err / unexpected end of JSON input，这是当前米游社 GameToken 确认接口的上游兼容故障，请改用短信验证码备用登录。",
+                qrStatus = "请使用米游社 App 扫码并确认。该方式会显示为电脑/通行证登录；短信验证码仍作为备用方式。",
             )
             pollMihoyoQr(session)
         }
@@ -137,10 +137,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             when (val result = qrClient.queryQr(session).getOrElse { MihoyoQrState.Failed(it.message ?: "查询失败") }) {
                 MihoyoQrState.Waiting -> _state.value = _state.value.copy(qrStatus = "等待扫码……")
                 MihoyoQrState.Scanned -> _state.value = _state.value.copy(
-                    qrStatus = "已扫码，请在米游社中确认。若米游社提示 JSON 截断，这是平台当前 GameToken 确认链路故障，签迹无法在二维码生成端修复。",
+                    qrStatus = "已扫码，请在米游社中确认电脑/通行证登录",
                 )
                 is MihoyoQrState.Confirmed -> {
-                    _state.value = _state.value.copy(qrStatus = "正在交换凭证并注册 Android 设备……")
+                    _state.value = _state.value.copy(qrStatus = "正在交换通行证登录凭证……")
                     val credential = qrClient.exchangeCredential(session, result).getOrElse {
                         _state.value = _state.value.copy(qrSession = null, qrStatus = "登录失败：${it.message}")
                         return
@@ -149,7 +149,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _state.value = _state.value.copy(
                         mihoyoLoggedIn = true,
                         qrSession = null,
-                        qrStatus = "米游社二维码登录成功，Android 设备身份已保存",
+                        qrStatus = "米游社二维码登录成功",
                     )
                     return
                 }
@@ -162,7 +162,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         _state.value = _state.value.copy(
             qrSession = null,
-            qrStatus = "二维码未能完成确认。当前 GameToken 二维码在米游社确认端存在已知 JSON 截断问题，请使用短信验证码备用登录。",
+            qrStatus = "二维码已超时，请重新获取",
         )
     }
 
