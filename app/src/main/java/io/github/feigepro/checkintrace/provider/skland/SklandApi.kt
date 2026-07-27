@@ -1,8 +1,12 @@
 package io.github.feigepro.checkintrace.provider.skland
 
 import io.github.feigepro.checkintrace.logging.DevLogger
+import java.time.Instant
+import java.util.concurrent.TimeUnit
+import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -14,36 +18,65 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.time.Instant
-import java.util.concurrent.TimeUnit
-import java.util.zip.GZIPInputStream
+
+@Serializable
+data class SklandCredentialBundle(
+    val accessToken: String,
+    val cred: String? = null,
+    val signToken: String? = null,
+    val userId: String? = null,
+)
 
 data class SklandSession(val cred: String, val signToken: String)
+
+class SklandAuthException(val apiCode: Int, message: String) : IllegalStateException(message)
 
 class SklandApi(
     private val client: OkHttpClient = defaultClient(),
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
-    suspend fun exchangeToken(token: String, taskId: String? = null): Result<SklandSession> =
+    suspend fun exchangeToken(token: String, taskId: String? = null): Result<SklandCredentialBundle> =
         withContext(Dispatchers.IO) {
             runCatching {
                 DevLogger.debug("森空岛/登录", "开始交换登录凭证", taskId)
                 val grantBody = "{\"appCode\":\"$APP_CODE\",\"token\":${jsonString(token)},\"type\":0}"
                 val grant = postJson(GRANT_CODE_URL, grantBody, baseHeaders())
-                check(apiCode(grant) == 0) { apiMessage(grant) }
+                requireApiSuccess(grant)
                 val code = grant["data"]!!.jsonObject["code"]!!.jsonPrimitive.content
 
                 val credBody = "{\"code\":${jsonString(code)},\"kind\":1}"
                 val credResponse = postJson(CRED_CODE_URL, credBody, baseHeaders())
-                check(apiCode(credResponse) == 0) { apiMessage(credResponse) }
+                requireApiSuccess(credResponse)
                 val data = credResponse["data"]!!.jsonObject
                 DevLogger.info("森空岛/登录", "凭证交换成功", taskId)
-                SklandSession(
+                SklandCredentialBundle(
+                    accessToken = token,
                     cred = data["cred"]!!.jsonPrimitive.content,
                     signToken = data["token"]!!.jsonPrimitive.content,
+                    userId = data["userId"]?.jsonPrimitive?.content,
                 )
             }.onFailure {
                 DevLogger.error("森空岛/登录", it.message ?: "凭证交换失败", taskId)
+            }
+        }
+
+    suspend fun refreshSignToken(cred: String, taskId: String? = null): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder()
+                    .url(REFRESH_URL)
+                    .headers(baseHeaders().newBuilder().add("cred", cred).build())
+                    .get()
+                    .build()
+                val root = executeJson(request)
+                requireApiSuccess(root)
+                root["data"]?.jsonObject?.get("token")?.jsonPrimitive?.content
+                    ?.takeIf(String::isNotBlank)
+                    ?: error("刷新接口未返回 sign token")
+            }.onSuccess {
+                DevLogger.info("森空岛/登录", "签名凭证刷新成功", taskId)
+            }.onFailure {
+                DevLogger.warn("森空岛/登录", "签名凭证刷新失败：${it.message}", taskId)
             }
         }
 
@@ -56,7 +89,7 @@ class SklandApi(
                     .get()
                     .build()
                 executeJson(request).also {
-                    check(apiCode(it) == 0) { apiMessage(it) }
+                    requireApiSuccess(it)
                     DevLogger.info("森空岛/角色", "绑定角色查询成功", taskId)
                 }
             }.onFailure {
@@ -154,6 +187,14 @@ class SklandApi(
         .add("Connection", "close")
         .build()
 
+    private fun requireApiSuccess(value: JsonObject) {
+        val code = apiCode(value)
+        if (code == 0) return
+        val message = apiMessage(value)
+        if (code == 10000 || code == 10002) throw SklandAuthException(code, message)
+        error(message)
+    }
+
     private fun apiCode(value: JsonObject): Int =
         value["status"]?.jsonPrimitive?.content?.toIntOrNull()
             ?: value["code"]?.jsonPrimitive?.content?.toIntOrNull()
@@ -172,6 +213,7 @@ class SklandApi(
         private const val BINDING_URL = "https://zonai.skland.com/api/v1/game/player/binding"
         private const val CRED_CODE_URL = "https://zonai.skland.com/api/v1/user/auth/generate_cred_by_code"
         private const val GRANT_CODE_URL = "https://as.hypergryph.com/user/oauth2/v2/grant"
+        private const val REFRESH_URL = "https://zonai.skland.com/api/v1/auth/refresh"
         private const val APP_CODE = "4ca99fa6b56cc2ba"
         private const val USER_AGENT =
             "Skland/1.32.1 (com.hypergryph.skland; build:103201004; Android 33; ) Okhttp/4.11.0"
