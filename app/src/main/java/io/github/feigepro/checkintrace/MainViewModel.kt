@@ -14,7 +14,6 @@ import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrLoginClient
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrSession
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrState
 import io.github.feigepro.checkintrace.provider.skland.SklandApi
-import io.github.feigepro.checkintrace.provider.skland.SklandCredentialBundle
 import io.github.feigepro.checkintrace.provider.skland.SklandProvider
 import io.github.feigepro.checkintrace.provider.skland.SklandQrLoginClient
 import io.github.feigepro.checkintrace.provider.skland.SklandQrPollResult
@@ -85,20 +84,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = _state.value.copy(autoCheckInSnapshot = autoCheckInStatusStore.load())
     }
 
+    fun refreshLoginStates() {
+        _state.value = _state.value.copy(
+            mihoyoLoggedIn = repository.loadMihoyo(DEFAULT_ACCOUNT) != null,
+            sklandLoggedIn = repository.loadSkland(DEFAULT_ACCOUNT) != null,
+        )
+    }
+
     fun beginMihoyoLogin() {
-        if (_state.value.busy || _state.value.sklandQrSession != null) return
+        if (_state.value.busy || _state.value.qrSession != null || _state.value.sklandQrSession != null) return
         viewModelScope.launch {
-            _state.value = _state.value.copy(busy = true, qrStatus = "正在创建米游社登录二维码……")
-            // 游戏 SDK 二维码在当前平台接口上会在确认阶段返回 decode err，
-            // 因此默认使用已经验证可工作的米游社通行证二维码链路。
-            val session = qrClient.createPassportQr().getOrElse {
+            _state.value = _state.value.copy(
+                busy = true,
+                qrStatus = "正在创建 Android GameToken 登录二维码……",
+            )
+            val session = qrClient.createQr().getOrElse {
                 _state.value = _state.value.copy(busy = false, qrStatus = "二维码创建失败：${it.message}")
                 return@launch
             }
             _state.value = _state.value.copy(
                 busy = false,
                 qrSession = session,
-                qrStatus = "请使用米游社扫码并确认登录。平台可能显示“另一台电脑/设备登录”，这是二维码授权的通用提示",
+                qrStatus = "请使用米游社 App 扫码并确认。登录成功后会把同一设备注册为 Android 米游社设备。",
             )
             pollMihoyoQr(session)
         }
@@ -114,10 +121,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             when (val result = qrClient.queryQr(session).getOrElse { MihoyoQrState.Failed(it.message ?: "查询失败") }) {
                 MihoyoQrState.Waiting -> _state.value = _state.value.copy(qrStatus = "等待扫码……")
                 MihoyoQrState.Scanned -> _state.value = _state.value.copy(
-                    qrStatus = "已扫码，请在米游社中确认登录。“另一台电脑/设备”是平台的通用授权提示",
+                    qrStatus = "已扫码，请在米游社 App 中确认登录",
                 )
                 is MihoyoQrState.Confirmed -> {
-                    _state.value = _state.value.copy(qrStatus = "正在交换并安全保存签到凭证……")
+                    _state.value = _state.value.copy(qrStatus = "正在交换凭证并注册 Android 设备……")
                     val credential = qrClient.exchangeCredential(session, result).getOrElse {
                         _state.value = _state.value.copy(qrSession = null, qrStatus = "登录失败：${it.message}")
                         return
@@ -126,7 +133,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _state.value = _state.value.copy(
                         mihoyoLoggedIn = true,
                         qrSession = null,
-                        qrStatus = "米游社登录成功",
+                        qrStatus = "米游社二维码登录成功，Android 设备身份已保存",
                     )
                     return
                 }
@@ -210,43 +217,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun saveSklandCredential(
-        accessToken: String,
-        cred: String?,
-        signToken: String?,
-        userId: String?,
-    ) {
-        if (accessToken.isBlank()) return
-        repository.saveSkland(
-            DEFAULT_ACCOUNT,
-            SklandCredentialBundle(
-                accessToken = accessToken,
-                cred = cred,
-                signToken = signToken,
-                userId = userId,
-            ),
-        )
-        _state.value = _state.value.copy(
-            sklandLoggedIn = true,
-            output = listOf("${nowLabel()} 森空岛登录与会话凭证已加密保存"),
-        )
-    }
-
-    fun saveSklandToken(token: String) {
-        if (token.isBlank()) return
-        val existing = repository.loadSkland(DEFAULT_ACCOUNT)
-        val completeExistingSession = existing?.accessToken == token &&
-            !existing.cred.isNullOrBlank() &&
-            !existing.signToken.isNullOrBlank()
-        if (!completeExistingSession) repository.saveSklandToken(DEFAULT_ACCOUNT, token)
-        _state.value = _state.value.copy(
-            sklandLoggedIn = true,
-            output = listOf("${nowLabel()} 森空岛登录与会话凭证已加密保存"),
-        )
-    }
-
     fun runSelectedCheckIns() {
-        if (_state.value.busy) return
+        if (_state.value.busy || _state.value.qrSession != null || _state.value.sklandQrSession != null) return
         viewModelScope.launch {
             val taskId = DevLogger.newTaskId()
             val lines = mutableListOf<String>()
@@ -303,7 +275,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             DevLogger.info("任务", "签到测试结束，共 ${lines.size} 条结果", taskId)
-            _state.value = _state.value.copy(busy = false, output = lines.ifEmpty { listOf("${nowLabel()} 没有选择游戏") })
+            _state.value = _state.value.copy(
+                busy = false,
+                output = lines.ifEmpty { listOf("${nowLabel()} 没有选择游戏") },
+            )
         }
     }
 
