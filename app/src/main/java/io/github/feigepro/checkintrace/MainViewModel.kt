@@ -13,8 +13,12 @@ import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoProvider
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrLoginClient
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrSession
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrState
+import io.github.feigepro.checkintrace.provider.skland.SklandApi
 import io.github.feigepro.checkintrace.provider.skland.SklandCredentialBundle
 import io.github.feigepro.checkintrace.provider.skland.SklandProvider
+import io.github.feigepro.checkintrace.provider.skland.SklandQrLoginClient
+import io.github.feigepro.checkintrace.provider.skland.SklandQrPollResult
+import io.github.feigepro.checkintrace.provider.skland.SklandQrSession
 import io.github.feigepro.checkintrace.security.CredentialRepository
 import io.github.feigepro.checkintrace.security.EncryptedCredentialStore
 import java.time.LocalTime
@@ -34,6 +38,8 @@ data class MainUiState(
     val autoCheckInSnapshot: AutoCheckInSnapshot? = null,
     val qrSession: MihoyoQrSession? = null,
     val qrStatus: String? = null,
+    val sklandQrSession: SklandQrSession? = null,
+    val sklandQrStatus: String? = null,
     val busy: Boolean = false,
     val output: List<String> = emptyList(),
 )
@@ -45,6 +51,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         deviceIdentity = repository.loadMihoyoDeviceIdentity()
             ?: MihoyoQrLoginClient.generateDeviceIdentity().also(repository::saveMihoyoDeviceIdentity),
     )
+    private val sklandQrClient = SklandQrLoginClient()
+    private val sklandApi = SklandApi()
     private val preferences = application.getSharedPreferences("ui_settings", 0)
     private val initialSchedule = AutoCheckInScheduler.currentTime(application)
     private val _state = MutableStateFlow(
@@ -78,7 +86,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun beginMihoyoLogin() {
-        if (_state.value.busy) return
+        if (_state.value.busy || _state.value.sklandQrSession != null) return
         viewModelScope.launch {
             _state.value = _state.value.copy(busy = true, qrStatus = "正在创建米游社登录二维码……")
             // 游戏 SDK 二维码在当前平台接口上会在确认阶段返回 decode err，
@@ -130,6 +138,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             delay(2_000)
         }
         _state.value = _state.value.copy(qrSession = null, qrStatus = "二维码已超时，请重新获取")
+    }
+
+    fun beginSklandLogin() {
+        if (_state.value.busy || _state.value.qrSession != null || _state.value.sklandQrSession != null) return
+        viewModelScope.launch {
+            val taskId = DevLogger.newTaskId()
+            _state.value = _state.value.copy(
+                busy = true,
+                sklandQrStatus = "正在创建森空岛官方登录二维码……",
+            )
+            val session = sklandQrClient.create(taskId).getOrElse {
+                _state.value = _state.value.copy(
+                    busy = false,
+                    sklandQrStatus = "二维码创建失败：${it.message}",
+                )
+                return@launch
+            }
+            _state.value = _state.value.copy(
+                busy = false,
+                sklandQrSession = session,
+                sklandQrStatus = "请使用森空岛 App 扫码并确认登录",
+            )
+            pollSklandQr(session, taskId)
+        }
+    }
+
+    fun cancelSklandLogin() {
+        _state.value = _state.value.copy(sklandQrSession = null, sklandQrStatus = null)
+    }
+
+    private suspend fun pollSklandQr(session: SklandQrSession, taskId: String) {
+        repeat(50) {
+            if (_state.value.sklandQrSession?.scanId != session.scanId) return
+            delay(2_000)
+            when (val result = sklandQrClient.poll(session, taskId).getOrElse {
+                _state.value = _state.value.copy(
+                    sklandQrSession = null,
+                    sklandQrStatus = "登录轮询失败：${it.message}",
+                )
+                return
+            }) {
+                SklandQrPollResult.Waiting -> _state.value = _state.value.copy(
+                    sklandQrStatus = "等待扫码并确认……",
+                )
+                is SklandQrPollResult.Confirmed -> {
+                    _state.value = _state.value.copy(
+                        sklandQrStatus = "已确认，正在验证并安全保存森空岛凭证……",
+                    )
+                    val credential = sklandApi.exchangeToken(result.token, taskId).getOrElse {
+                        _state.value = _state.value.copy(
+                            sklandQrSession = null,
+                            sklandQrStatus = "登录凭证验证失败：${it.message}",
+                        )
+                        return
+                    }
+                    repository.saveSkland(DEFAULT_ACCOUNT, credential)
+                    DevLogger.info("森空岛/登录", "登录成功，会话凭证已加密保存", taskId)
+                    _state.value = _state.value.copy(
+                        sklandLoggedIn = true,
+                        sklandQrSession = null,
+                        sklandQrStatus = "森空岛登录成功",
+                    )
+                    return
+                }
+            }
+        }
+        _state.value = _state.value.copy(
+            sklandQrSession = null,
+            sklandQrStatus = "二维码已过期，请重新获取",
+        )
     }
 
     fun saveSklandCredential(
