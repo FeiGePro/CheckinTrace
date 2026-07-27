@@ -1,3 +1,4 @@
+# Trigger the signed v0.2.4 publication after the workflow is present on main.
 name: Publish v0.2.4 once
 
 on:
