@@ -11,10 +11,10 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -36,7 +36,16 @@ data class MihoyoQrSession(
 sealed interface MihoyoQrState {
     data object Waiting : MihoyoQrState
     data object Scanned : MihoyoQrState
-    data class Confirmed(val accountId: String, val gameToken: String) : MihoyoQrState
+
+    /**
+     * The legacy property name is retained for source compatibility. In the passport QR flow it stores stoken_v2.
+     */
+    data class Confirmed(
+        val accountId: String,
+        val gameToken: String,
+        val mid: String? = null,
+    ) : MihoyoQrState
+
     data class Failed(val message: String) : MihoyoQrState
 }
 
@@ -66,11 +75,10 @@ data class MihoyoCredentialBundle(
 }
 
 /**
- * 米游社主登录流程。
+ * Primary miHoYo login restored to the previously verified passport QR flow.
  *
- * 完整采用 README 所列 nonebot-plugin-mystool 的 GameToken 二维码链路：
- * app_id=2 创建/轮询二维码，同一个持久化 device_id 换取 stoken 与 cookie_token，
- * 最后执行 Android deviceLogin/saveDevice。这里不再混入 Capture、网页或启动器二维码。
+ * This QR authorizes a passport/desktop-style session. It is deliberately kept separate from the
+ * Android attendance flow: MihoyoProvider performs Android deviceLogin/saveDevice before attendance.
  */
 class MihoyoQrLoginClient(
     private val client: OkHttpClient = defaultClient(),
@@ -78,17 +86,21 @@ class MihoyoQrLoginClient(
     private val random: SecureRandom = SecureRandom(),
     private val deviceProfile: MihoyoDeviceProfile = MihoyoDeviceProfile.current(),
     private val deviceIdentity: MihoyoDeviceIdentity = generateDeviceIdentity(),
-    private val deviceRegistrationApi: MihoyoDeviceRegistrationApi = MihoyoDeviceRegistrationApi(),
 ) {
     suspend fun createQr(taskId: String? = null): Result<MihoyoQrSession> = withContext(Dispatchers.IO) {
         runCatching {
-            val body = "{\"app_id\":\"$GAME_QR_APP_ID\",\"device\":${jsonString(deviceIdentity.deviceId)}}"
-            val response = postJson(GAME_QR_FETCH_URL, body)
-            ensureSuccess(response, "生成 GameToken 二维码失败")
-            val url = response["data"]?.jsonObject?.get("url")?.jsonPrimitive?.content.orEmpty()
-            val ticket = url.toHttpUrlOrNull()?.queryParameter("ticket").orEmpty()
+            val body = "{}"
+            val response = postJson(
+                PASSPORT_QR_FETCH_URL,
+                body,
+                passportQrHeaders(deviceIdentity.deviceId, deviceIdentity.deviceFp, body),
+            )
+            ensureSuccess(response, "生成米游社通行证二维码失败")
+            val data = response["data"]?.jsonObject ?: error("二维码接口未返回 data")
+            val url = data["url"]?.jsonPrimitive?.content.orEmpty()
+            val ticket = data["ticket"]?.jsonPrimitive?.content.orEmpty()
             check(url.isNotBlank() && ticket.isNotBlank()) { "二维码接口未返回 url/ticket" }
-            DevLogger.info("米游社/登录", "Android GameToken 二维码创建成功", taskId)
+            DevLogger.info("米游社/登录", "通行证二维码创建成功", taskId)
             MihoyoQrSession(
                 url = url,
                 ticket = ticket,
@@ -105,35 +117,36 @@ class MihoyoQrLoginClient(
         taskId: String? = null,
     ): Result<MihoyoQrState> = withContext(Dispatchers.IO) {
         runCatching {
-            val body = buildString {
-                append("{\"app_id\":\"")
-                append(GAME_QR_APP_ID)
-                append("\",\"device\":")
-                append(jsonString(session.deviceId))
-                append(",\"ticket\":")
-                append(jsonString(session.ticket))
-                append('}')
-            }
-            val response = postJson(GAME_QR_QUERY_URL, body)
+            val body = "{\"ticket\":${jsonString(session.ticket)}}"
+            val response = postJson(
+                PASSPORT_QR_QUERY_URL,
+                body,
+                passportQrHeaders(session.deviceId, session.deviceFp, body),
+            )
             val code = retcode(response)
-            if (code == -106) return@runCatching MihoyoQrState.Failed("二维码已过期")
             if (code != 0) return@runCatching MihoyoQrState.Failed("retcode=$code ${message(response)}")
             val data = response["data"]?.jsonObject ?: return@runCatching MihoyoQrState.Waiting
-            when (val status = data["stat"]?.jsonPrimitive?.content.orEmpty()) {
+            when (val status = data["status"]?.jsonPrimitive?.content.orEmpty()) {
                 "Init", "Created" -> MihoyoQrState.Waiting
                 "Scanned" -> MihoyoQrState.Scanned
                 "Confirmed" -> {
-                    val raw = data["payload"]?.jsonObject?.get("raw")?.jsonPrimitive?.content.orEmpty()
-                    val payload = json.parseToJsonElement(raw).jsonObject
-                    val uid = payload["uid"]?.jsonPrimitive?.content.orEmpty()
-                    val gameToken = payload["token"]?.jsonPrimitive?.content.orEmpty()
-                    check(uid.isNotBlank() && gameToken.isNotBlank()) {
-                        "扫码结果缺少 uid/game_token"
+                    val userInfo = data["user_info"]?.jsonObject ?: error("扫码结果缺少 user_info")
+                    val tokens = data["tokens"]?.jsonArray.orEmpty()
+                    val stoken = tokens.firstOrNull()
+                        ?.jsonObject
+                        ?.get("token")
+                        ?.jsonPrimitive
+                        ?.content
+                        .orEmpty()
+                    val mid = userInfo["mid"]?.jsonPrimitive?.content.orEmpty()
+                    val aid = userInfo["aid"]?.jsonPrimitive?.content.orEmpty()
+                    check(stoken.isNotBlank() && mid.isNotBlank() && aid.isNotBlank()) {
+                        "扫码结果缺少 stoken/mid/aid"
                     }
-                    DevLogger.info("米游社/登录", "扫码确认成功，开始交换 Android 登录凭证", taskId)
-                    MihoyoQrState.Confirmed(uid, gameToken)
+                    DevLogger.info("米游社/登录", "通行证扫码确认成功，开始交换签到凭证", taskId)
+                    MihoyoQrState.Confirmed(accountId = aid, gameToken = stoken, mid = mid)
                 }
-                else -> MihoyoQrState.Failed("未知二维码状态：$status")
+                else -> MihoyoQrState.Failed("未知通行证二维码状态：$status")
             }
         }.onFailure {
             DevLogger.error("米游社/登录", it.message ?: "二维码状态查询失败", taskId)
@@ -146,13 +159,15 @@ class MihoyoQrLoginClient(
         taskId: String? = null,
     ): Result<MihoyoCredentialBundle> = withContext(Dispatchers.IO) {
         runCatching {
-            val account = exchangeGameToken(confirmed.accountId, confirmed.gameToken, qrSession)
-            val cookieToken = exchangeCookieToken(account.stoken, account.mid, qrSession)
+            val mid = confirmed.mid ?: error("通行证扫码结果缺少 mid")
+            val stoken = confirmed.gameToken
+            val cookieToken = exchangeCookieToken(stoken, mid, qrSession)
             check(cookieToken.isNotBlank()) { "stoken 换 cookie_token 失败：接口未返回 token" }
-            val credential = MihoyoCredentialBundle(
-                accountId = account.accountId,
-                mid = account.mid,
-                stoken = account.stoken,
+            DevLogger.info("米游社/登录", "通行证登录凭证交换成功", taskId)
+            MihoyoCredentialBundle(
+                accountId = confirmed.accountId,
+                mid = mid,
+                stoken = stoken,
                 ltoken = null,
                 cookieToken = cookieToken,
                 deviceId = qrSession.deviceId,
@@ -161,44 +176,9 @@ class MihoyoQrLoginClient(
                 deviceName = deviceProfile.name,
                 systemVersion = deviceProfile.systemVersion,
             )
-            deviceRegistrationApi.register(credential, taskId).getOrThrow()
-            DevLogger.info("米游社/登录", "凭证交换及 Android 设备注册成功", taskId)
-            credential
         }.onFailure {
             DevLogger.error("米游社/登录", it.message ?: "登录凭证交换失败", taskId)
         }
-    }
-
-    private fun exchangeGameToken(
-        accountId: String,
-        gameToken: String,
-        session: MihoyoQrSession,
-    ): TokenAccount {
-        val numericId = accountId.toLongOrNull() ?: error("二维码返回了无效账号 ID")
-        val body = "{\"account_id\":$numericId,\"game_token\":${jsonString(gameToken)}}"
-        val ds = MihoyoDsSigner.k2(body, Instant.now().epochSecond, randomLetters(6))
-        val headers = Headers.Builder()
-            .add("x-rpc-app_id", PASSPORT_APP_ID)
-            .add("x-rpc-client_type", "2")
-            .add("x-rpc-game_biz", "bbs_cn")
-            .add("x-rpc-device_id", session.deviceId)
-            .add("x-rpc-device_fp", session.deviceFp)
-            .add("x-rpc-device_model", deviceProfile.model)
-            .add("x-rpc-device_name", deviceProfile.name)
-            .add("x-rpc-sys_version", deviceProfile.systemVersion)
-            .add("DS", ds)
-            .add("User-Agent", deviceProfile.userAgent(BBS_VERSION))
-            .add("Content-Type", "application/json")
-            .build()
-        val response = postJson(GET_TOKEN_BY_GAME_TOKEN_URL, body, headers)
-        ensureSuccess(response, "game_token 换 stoken 失败")
-        val data = response["data"]?.jsonObject ?: error("game_token 交换结果缺少 data")
-        val token = data["token"]?.jsonObject?.get("token")?.jsonPrimitive?.content.orEmpty()
-        val userInfo = data["user_info"]?.jsonObject ?: error("game_token 交换结果缺少 user_info")
-        val mid = userInfo["mid"]?.jsonPrimitive?.content.orEmpty()
-        val aid = userInfo["aid"]?.jsonPrimitive?.content.orEmpty().ifBlank { accountId }
-        check(token.isNotBlank() && mid.isNotBlank()) { "game_token 交换结果缺少 stoken/mid" }
-        return TokenAccount(aid, mid, token)
     }
 
     private fun exchangeCookieToken(
@@ -237,6 +217,31 @@ class MihoyoQrLoginClient(
         return response["data"]?.jsonObject?.get("cookie_token")?.jsonPrimitive?.content.orEmpty()
     }
 
+    private fun passportQrHeaders(deviceId: String, deviceFp: String, exactBody: String): Headers {
+        val ds = MihoyoDsSigner.x4(
+            query = "",
+            body = exactBody,
+            epochSeconds = Instant.now().epochSecond,
+            randomNumber = random.nextInt(100_001) + 100_000,
+        )
+        return Headers.Builder()
+            .add("User-Agent", PASSPORT_APP_UA)
+            .add("Accept", "*/*")
+            .add("Accept-Language", "zh-cn")
+            .add("x-rpc-client_type", "3")
+            .add("x-rpc-app_version", PASSPORT_APP_VERSION)
+            .add("x-rpc-device_id", deviceId)
+            .add("x-rpc-device_fp", deviceFp)
+            .add("x-rpc-game_biz", "bbs_cn")
+            .add("x-rpc-app_id", PASSPORT_APP_ID)
+            .add("x-rpc-sdk_version", PASSPORT_APP_VERSION)
+            .add("x-rpc-device_model", deviceProfile.model)
+            .add("x-rpc-device_name", deviceProfile.name)
+            .add("x-rpc-account_version", PASSPORT_APP_VERSION)
+            .add("DS", ds)
+            .build()
+    }
+
     private fun postJson(
         url: String,
         body: String,
@@ -270,30 +275,22 @@ class MihoyoQrLoginClient(
 
     private fun jsonString(value: String): String = json.encodeToString(String.serializer(), value)
 
-    private fun randomLetters(length: Int): String = buildString(length) {
-        val values = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        repeat(length) { append(values[random.nextInt(values.length)]) }
-    }
-
-    private data class TokenAccount(val accountId: String, val mid: String, val stoken: String)
-
     companion object {
         fun generateDeviceIdentity(random: SecureRandom = SecureRandom()): MihoyoDeviceIdentity = MihoyoDeviceIdentity(
             deviceId = UUID.randomUUID().toString().uppercase(),
             deviceFp = buildString(13) { repeat(13) { append("0123456789abcdef"[random.nextInt(16)]) } },
         )
 
-        private const val GAME_QR_FETCH_URL =
-            "https://hk4e-sdk.mihoyo.com/hk4e_cn/combo/panda/qrcode/fetch"
-        private const val GAME_QR_QUERY_URL =
-            "https://hk4e-sdk.mihoyo.com/hk4e_cn/combo/panda/qrcode/query"
-        private const val GET_TOKEN_BY_GAME_TOKEN_URL =
-            "https://api-takumi.mihoyo.com/account/ma-cn-session/app/getTokenByGameToken"
+        private const val PASSPORT_QR_FETCH_URL =
+            "https://passport-api.mihoyo.com/account/ma-cn-passport/app/createQRLogin"
+        private const val PASSPORT_QR_QUERY_URL =
+            "https://passport-api.mihoyo.com/account/ma-cn-passport/app/queryQRLoginStatus"
         private const val GET_COOKIE_TOKEN_URL =
             "https://passport-api.mihoyo.com/account/auth/api/getCookieAccountInfoBySToken"
-        private const val GAME_QR_APP_ID = "2"
         private const val PASSPORT_APP_ID = "bll8iq97cem8"
-        private const val BBS_VERSION = "2.63.1"
+        private const val PASSPORT_APP_VERSION = "2.90.1"
+        private const val PASSPORT_APP_UA = "Mozilla/5.0 miHoYoBBS/2.90.1 Capture/2.2.0"
+        private const val BBS_VERSION = "2.106.2"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
         private fun defaultClient() = OkHttpClient.Builder()
