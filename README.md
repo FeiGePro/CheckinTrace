@@ -6,13 +6,16 @@
 
 ## 功能
 
-- 米游社扫码登录，支持原神、崩坏：星穹铁道、绝区零、崩坏 3、未定事件簿和崩坏学园 2
-- 森空岛官方二维码扫码登录，支持明日方舟和明日方舟：终末地
+- 米游社以二维码为主要登录方式，短信验证码为备用方式
+- 两种米游社登录方式复用同一份本机 Android 设备身份，不使用启动器或电脑客户端凭证
+- 支持原神、崩坏：星穹铁道、绝区零、崩坏 3、未定事件簿和崩坏学园 2
+- 森空岛官方二维码直接显示在 App 内，支持明日方舟和明日方舟：终末地
 - 自由选择参与签到的游戏，未选择的游戏默认收起
 - 自定义每日执行时间，也可随时手动签到
 - 使用 WorkManager 在联网且电量不低时执行低功耗后台任务
 - 首页持久化显示最近一次自动签到的时间、状态和各游戏结果
 - 临时网络或接口错误会间隔约一小时自动重试一次
+- POST 已开始、响应结果未知或进程中断时不会自动重复提交同一角色
 - 登录失效、人工验证或最终失败时可发送系统通知
 - 登录凭证通过 Android Keystore 与 AES-GCM 加密，仅保存在本机
 - 区分成功、今日已签到、凭证失效和人工验证等状态
@@ -30,8 +33,8 @@
 1. 安装 APK，并至少主动打开一次“签迹”，让应用创建或更新后台计划任务。
 2. Android 13 及以上系统会询问通知权限；允许后，自动签到需要重新登录、人工验证或最终失败时会收到提醒。
 3. 登录需要使用的社区：
-   - 米游社：生成二维码后，使用米游社扫码并确认；同一台手机可以先截图，再从米游社扫码页的相册中识别。
-   - 森空岛：生成官方登录二维码后，使用森空岛 App 扫码并确认；同一台手机同样可以截图后从相册识别。
+   - 米游社：优先点击“二维码登录”，使用米游社扫码并确认；同一台手机可以先截图，再从米游社扫码页的相册中识别。二维码不可用时再选择“短信验证码”。
+   - 森空岛：二维码直接显示在主界面，使用森空岛 App 扫码并确认；同一台手机同样可以截图后从相册识别。
 4. 在“我的签到”中选择需要签到的游戏，点击顶部时间修改每日计划。
 5. 首次使用建议点击“立即签到”，确认账号、角色和接口返回状态均正常。
 6. 保留应用的后台运行权限，不要在系统设置中对应用执行“强制停止”。
@@ -42,7 +45,7 @@
 - 任务要求手机已联网且电量不低。条件暂时不满足时，系统会推迟执行，而不是在计划时刻强行运行。
 - 普通返回桌面、锁屏、划掉最近任务或系统回收应用进程，通常不会取消已登记的后台任务；在系统设置中“强制停止”后，需要再次主动打开应用。
 - 手机厂商的后台限制可能影响执行时间，建议允许应用后台运行，并根据设备情况关闭针对“签迹”的过度省电限制。
-- 临时网络或接口错误最多自动重试一次；重复执行前仍会先查询当天状态，避免重复签到。
+- 临时网络或接口错误最多自动重试一次；任务会持久化已完成、结果未知以及已开始提交的角色，避免重试时重复提交。
 - 平台凭证过期、要求人工验证或接口发生变化时，自动签到可能失败，需要重新登录或更新应用。
 - Release 构建不保存开发日志，但会在首页保留最近一次自动签到结果；点击状态卡上的“刷新”可以重新读取后台执行记录。
 
@@ -74,15 +77,15 @@ macOS / Linux：
 
 详细报告方式见 [SECURITY.md](SECURITY.md)。
 
-## 兼容性参考
+## 兼容性参考与协议边界
 
-本项目的 Android 代码为独立 Kotlin 实现。协议行为核对参考了以下公开项目：
+本项目的 Android 代码为独立 Kotlin 实现。不同流程固定参考不同项目，禁止把版本号、客户端类型、请求头或请求体跨流程拼接：
 
-- [nonebot-plugin-mystool](https://github.com/Ljzd-PRO/nonebot-plugin-mystool)
-- [mihoyo_qr_login](https://github.com/jiarui666/mihoyo_qr_login)
-- [MiyoQian](https://github.com/Marchen-orz/MiyoQian)
-- [nonebot-plugin-skland](https://github.com/FrostN0v0/nonebot-plugin-skland)
-- [skyland_auto_checkin](https://github.com/devnakx/skyland_auto_checkin)
+- **米游社主二维码登录**：[nonebot-plugin-mystool](https://github.com/Ljzd-PRO/nonebot-plugin-mystool) 的 GameToken 二维码、token 交换和 Android `deviceLogin → saveDevice` 流程；[mihoyo_qr_login](https://github.com/jiarui666/mihoyo_qr_login) 仅用于交叉核对 GameToken 状态机。
+- **米游社备用短信登录**：[MiyoQian](https://github.com/Marchen-orz/MiyoQian) 的 Android 短信验证码、RSA、AIGIS 和 token 交换流程；成功后仍进入上述 Android 设备登记流程。
+- **米游社签到**：[nonebot-plugin-mystool](https://github.com/Ljzd-PRO/nonebot-plugin-mystool) 的 Android 设备登记、Android 请求头、body DS 和 `risk_code` 判断流程。
+- **森空岛二维码登录**：[nonebot-plugin-skland](https://github.com/FrostN0v0/nonebot-plugin-skland) 的 `scanId → scanCode → access token → cred/sign token` 流程。
+- **森空岛签到**：[skyland_auto_checkin](https://github.com/devnakx/skyland_auto_checkin) 的角色字段、签名输入、明日方舟与终末地 `/api/v1` 请求体和结果解析流程。
 
 感谢这些项目公开的研究与实现。第三方项目仍分别受其原始许可证和使用条件约束。
 
