@@ -41,22 +41,33 @@ class SklandProvider(
     }
 
     override suspend fun checkIn(game: GameDefinition, role: GameRole): CheckInResult {
-        val request: suspend (SklandSession) -> Result<JsonObject> = when (game.appCode) {
-            "arknights" -> {
-                val channelMasterId = role.extra["channelMasterId"]
-                    ?: return CheckInResult.Failure("ROLE_INVALID", "角色缺少 channelMasterId")
-                suspend fun(currentSession: SklandSession): Result<JsonObject> =
-                    api.checkInArknights(role.uid, channelMasterId, currentSession)
+        when (game.appCode) {
+            "arknights" -> if (role.extra["channelMasterId"].isNullOrBlank()) {
+                return CheckInResult.Failure("ROLE_INVALID", "角色缺少 channelMasterId")
             }
             "endfield" -> {
-                val roleId = role.extra["roleId"]
-                    ?: return CheckInResult.Failure("ROLE_INVALID", "终末地角色缺少 roleId")
-                val serverId = role.extra["serverId"]
-                    ?: return CheckInResult.Failure("ROLE_INVALID", "终末地角色缺少 serverId")
-                suspend fun(currentSession: SklandSession): Result<JsonObject> =
-                    api.checkInEndfield(roleId, serverId, currentSession)
+                if (role.extra["roleId"].isNullOrBlank()) {
+                    return CheckInResult.Failure("ROLE_INVALID", "终末地角色缺少 roleId")
+                }
+                if (role.extra["serverId"].isNullOrBlank()) {
+                    return CheckInResult.Failure("ROLE_INVALID", "终末地角色缺少 serverId")
+                }
             }
             else -> return CheckInResult.Failure("GAME_UNSUPPORTED", "暂不支持 ${game.displayName}")
+        }
+
+        suspend fun request(currentSession: SklandSession): Result<JsonObject> = when (game.appCode) {
+            "arknights" -> api.checkInArknights(
+                role.uid,
+                requireNotNull(role.extra["channelMasterId"]),
+                currentSession,
+            )
+            "endfield" -> api.checkInEndfield(
+                requireNotNull(role.extra["roleId"]),
+                requireNotNull(role.extra["serverId"]),
+                currentSession,
+            )
+            else -> Result.failure(IllegalArgumentException("不支持的游戏"))
         }
 
         val initialSession = ensureSession().getOrElse {
