@@ -53,14 +53,21 @@ internal fun AutoCheckInStatusCard(
                 color = runStateColor(snapshot.state),
                 fontWeight = FontWeight.SemiBold,
             )
+            snapshot.scheduledTimeLabel?.let {
+                Text(
+                    "计划时间：$it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Text(
-                "开始时间：${formatTimestamp(snapshot.startedAtEpochMillis)} · 第 ${snapshot.attempt} 次尝试",
+                "任务开始：${formatTimestamp(snapshot.startedAtEpochMillis)} · 第 ${snapshot.attempt} 次尝试",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             snapshot.finishedAtEpochMillis?.let {
                 Text(
-                    "完成时间：${formatTimestamp(it)}",
+                    "任务完成：${formatTimestamp(it)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -91,12 +98,12 @@ private fun runStateLabel(state: AutoCheckInRunState): String = when (state) {
     AutoCheckInRunState.RUNNING -> "正在自动签到"
     AutoCheckInRunState.SUCCESS -> "最近一次自动签到已完成"
     AutoCheckInRunState.RETRY_SCHEDULED -> "遇到临时错误，已安排重试"
-    AutoCheckInRunState.FAILED -> "最近一次自动签到存在失败"
+    AutoCheckInRunState.FAILED -> "最近一次自动签到存在失败或结果未知"
     AutoCheckInRunState.ACTION_REQUIRED -> "需要重新登录或完成平台验证"
 }
 
 private fun formatTimestamp(epochMillis: Long): String = TIMESTAMP_FORMATTER.format(Instant.ofEpochMilli(epochMillis))
 
-private const val MAX_VISIBLE_LINES = 6
+private const val MAX_VISIBLE_LINES = 20
 private val TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     .withZone(ZoneId.systemDefault())
