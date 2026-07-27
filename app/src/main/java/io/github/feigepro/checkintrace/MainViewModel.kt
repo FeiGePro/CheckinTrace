@@ -151,7 +151,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveSklandToken(token: String) {
-        saveSklandCredential(token, null, null, null)
+        if (token.isBlank()) return
+        val existing = repository.loadSkland(DEFAULT_ACCOUNT)
+        val completeExistingSession = existing?.accessToken == token &&
+            !existing.cred.isNullOrBlank() &&
+            !existing.signToken.isNullOrBlank()
+        if (!completeExistingSession) repository.saveSklandToken(DEFAULT_ACCOUNT, token)
+        _state.value = _state.value.copy(
+            sklandLoggedIn = true,
+            output = listOf("${nowLabel()} 森空岛登录与会话凭证已加密保存"),
+        )
     }
 
     fun runSelectedCheckIns() {
