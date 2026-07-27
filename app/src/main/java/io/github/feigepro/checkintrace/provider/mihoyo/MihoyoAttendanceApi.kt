@@ -4,6 +4,16 @@ import io.github.feigepro.checkintrace.data.CheckInResult
 import io.github.feigepro.checkintrace.data.GameDefinition
 import io.github.feigepro.checkintrace.data.GameRole
 import io.github.feigepro.checkintrace.logging.DevLogger
+import java.io.EOFException
+import java.io.IOException
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.ProtocolException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.security.SecureRandom
+import java.time.Instant
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -18,9 +28,6 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.security.SecureRandom
-import java.time.Instant
-import java.util.concurrent.TimeUnit
 
 data class MihoyoGameConfig(
     val appCode: String,
@@ -113,36 +120,64 @@ class MihoyoAttendanceApi(
         role: GameRole,
         taskId: String? = null,
     ): CheckInResult = withContext(Dispatchers.IO) {
-        runCatching {
-            val status = getStatus(game, role, taskId).getOrThrow()
-            if (status.firstBind) {
-                return@runCatching CheckInResult.Failure("FIRST_BIND_REQUIRED", "首次绑定，请先在米游社手动签到一次")
-            }
-            if (status.isSigned) return@runCatching CheckInResult.AlreadyCheckedIn
-            val config = requireConfig(game)
-            val region = role.extra["region"] ?: error("角色缺少 region")
-            val body = "{\"act_id\":\"${config.activityId}\",\"region\":\"${escape(region)}\",\"uid\":\"${escape(role.uid)}\"}"
-            val request = Request.Builder()
-                .url(config.signUrl)
-                .headers(signedHeaders(config, body))
-                .post(body.toRequestBody(JSON_MEDIA_TYPE))
-                .build()
-            val response = executeJson(request)
-            if (MihoyoAttendanceResponse.retcode(response) == -5003) {
-                return@runCatching CheckInResult.AlreadyCheckedIn
-            }
-            ensureSuccess(response)
-            if (MihoyoAttendanceResponse.requiresHumanVerification(response)) {
-                DevLogger.warn("米游社/${game.displayName}", "触发平台验证，停止后续请求", taskId)
-                CheckInResult.Failure("CAPTCHA_REQUIRED", "平台要求人工验证")
-            } else {
-                DevLogger.info("米游社/${game.displayName}", "签到成功", taskId)
-                CheckInResult.Success("签到成功")
-            }
-        }.getOrElse { error ->
-            DevLogger.error("米游社/${game.displayName}", error.message ?: "签到失败", taskId)
-            CheckInResult.Failure("NETWORK_OR_PROTOCOL", error.message ?: "签到失败", true)
+        val status = getStatus(game, role, taskId).getOrElse { error ->
+            DevLogger.error("米游社/${game.displayName}", error.message ?: "状态查询失败", taskId)
+            return@withContext CheckInResult.Failure(
+                code = "STATUS_QUERY_FAILED",
+                message = error.message ?: "状态查询失败",
+                retryable = MihoyoCheckInFailurePolicy.isSafeToRetryBeforeSubmit(error),
+            )
         }
+        if (status.firstBind) {
+            return@withContext CheckInResult.Failure("FIRST_BIND_REQUIRED", "首次绑定，请先在米游社手动签到一次")
+        }
+        if (status.isSigned) return@withContext CheckInResult.AlreadyCheckedIn
+
+        val config = requireConfig(game)
+        val region = role.extra["region"] ?: return@withContext CheckInResult.Failure("ROLE_INVALID", "角色缺少 region")
+        val body = "{\"act_id\":\"${config.activityId}\",\"region\":\"${escape(region)}\",\"uid\":\"${escape(role.uid)}\"}"
+        val request = Request.Builder()
+            .url(config.signUrl)
+            .headers(signedHeaders(config, body))
+            .post(body.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        runCatching { executeJson(request) }.fold(
+            onSuccess = { response ->
+                if (MihoyoAttendanceResponse.retcode(response) == -5003) {
+                    CheckInResult.AlreadyCheckedIn
+                } else {
+                    runCatching { ensureSuccess(response) }.fold(
+                        onSuccess = {
+                            if (MihoyoAttendanceResponse.requiresHumanVerification(response)) {
+                                DevLogger.warn("米游社/${game.displayName}", "触发平台验证，停止后续请求", taskId)
+                                CheckInResult.Failure("CAPTCHA_REQUIRED", "平台要求人工验证")
+                            } else {
+                                DevLogger.info("米游社/${game.displayName}", "签到成功", taskId)
+                                CheckInResult.Success("签到成功")
+                            }
+                        },
+                        onFailure = { error ->
+                            DevLogger.error("米游社/${game.displayName}", error.message ?: "签到失败", taskId)
+                            CheckInResult.Failure("API_ERROR", error.message ?: "签到失败")
+                        },
+                    )
+                }
+            },
+            onFailure = { error ->
+                DevLogger.error("米游社/${game.displayName}", error.message ?: "签到请求失败", taskId)
+                when {
+                    MihoyoCheckInFailurePolicy.isAmbiguousAfterSubmit(error) -> CheckInResult.Unknown(
+                        "签到请求已发送，但未能读取完整响应；平台可能已经完成签到，本次不自动重试",
+                    )
+                    else -> CheckInResult.Failure(
+                        code = "NETWORK_OR_PROTOCOL",
+                        message = error.message ?: "签到请求失败",
+                        retryable = MihoyoCheckInFailurePolicy.isSafeToRetryBeforeSubmit(error),
+                    )
+                }
+            },
+        )
     }
 
     private fun signedHeaders(config: MihoyoGameConfig, exactBody: String?): Headers {
@@ -210,5 +245,22 @@ class MihoyoAttendanceApi(
             .readTimeout(15, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
             .build()
+    }
+}
+
+internal object MihoyoCheckInFailurePolicy {
+    fun isSafeToRetryBeforeSubmit(error: Throwable): Boolean = when (error) {
+        is UnknownHostException,
+        is ConnectException,
+        is NoRouteToHostException -> true
+        else -> false
+    }
+
+    fun isAmbiguousAfterSubmit(error: Throwable): Boolean = when (error) {
+        is SocketTimeoutException,
+        is EOFException,
+        is ProtocolException -> true
+        is IOException -> !isSafeToRetryBeforeSubmit(error)
+        else -> false
     }
 }
