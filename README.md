@@ -7,7 +7,7 @@
 ## 功能
 
 - 米游社以二维码为主要登录方式，短信验证码为备用方式
-- 两种米游社登录方式复用同一份本机 Android 设备身份，不使用启动器或电脑客户端凭证
+- 米游社二维码采用已验证可用的电脑/通行证授权；取得凭证后，签到仍独立使用 Android 设备登记与 Android 请求头
 - 支持原神、崩坏：星穹铁道、绝区零、崩坏 3、未定事件簿和崩坏学园 2
 - 森空岛官方二维码直接显示在 App 内，支持明日方舟和明日方舟：终末地
 - 自由选择参与签到的游戏，未选择的游戏默认收起
@@ -33,8 +33,8 @@
 1. 安装 APK，并至少主动打开一次“签迹”，让应用创建或更新后台计划任务。
 2. Android 13 及以上系统会询问通知权限；允许后，自动签到需要重新登录、人工验证或最终失败时会收到提醒。
 3. 登录需要使用的社区：
-   - 米游社：优先点击“二维码登录”，使用米游社扫码并确认；同一台手机可以先截图，再从米游社扫码页的相册中识别。二维码不可用时再选择“短信验证码”。
-   - 森空岛：二维码直接显示在主界面，使用森空岛 App 扫码并确认；同一台手机同样可以截图后从相册识别。
+   - 米游社：优先点击“二维码登录”，使用米游社扫码并确认电脑/通行证授权；同一台手机可以先截图，再从米游社扫码页的相册中识别。短信验证码仍作为备用登录方式。
+   - 森空岛：二维码直接显示在主界面，使用森空岛 App 扫码并确认；同一台手机同样可以截图后从相册识别。截图预览、切换应用或页面重建后会恢复同一张二维码继续轮询。
 4. 在“我的签到”中选择需要签到的游戏，点击顶部时间修改每日计划。
 5. 首次使用建议点击“立即签到”，确认账号、角色和接口返回状态均正常。
 6. 保留应用的后台运行权限，不要在系统设置中对应用执行“强制停止”。
@@ -81,9 +81,9 @@ macOS / Linux：
 
 本项目的 Android 代码为独立 Kotlin 实现。不同流程固定参考不同项目，禁止把版本号、客户端类型、请求头或请求体跨流程拼接：
 
-- **米游社主二维码登录**：[nonebot-plugin-mystool](https://github.com/Ljzd-PRO/nonebot-plugin-mystool) 的 GameToken 二维码、token 交换和 Android `deviceLogin → saveDevice` 流程；[mihoyo_qr_login](https://github.com/jiarui666/mihoyo_qr_login) 仅用于交叉核对 GameToken 状态机。
-- **米游社备用短信登录**：[MiyoQian](https://github.com/Marchen-orz/MiyoQian) 的 Android 短信验证码、RSA、AIGIS 和 token 交换流程；成功后仍进入上述 Android 设备登记流程。
-- **米游社签到**：[nonebot-plugin-mystool](https://github.com/Ljzd-PRO/nonebot-plugin-mystool) 的 Android 设备登记、Android 请求头、body DS 和 `risk_code` 判断流程。
+- **米游社主二维码登录**：[MiyoQian](https://github.com/Marchen-orz/MiyoQian) 中已验证可用的通行证 `createQRLogin → queryQRLoginStatus`、Capture UA 与 stoken/cookie_token 交换流程。该步骤属于电脑/通行证授权，不伪装成 Android 登录。
+- **米游社备用短信登录**：[MiyoQian](https://github.com/Marchen-orz/MiyoQian) 的 Android 短信验证码、RSA、AIGIS 和 token 交换流程。
+- **米游社签到**：[nonebot-plugin-mystool](https://github.com/Ljzd-PRO/nonebot-plugin-mystool) 的 Android 设备登记、Android 请求头、body DS 和 `risk_code` 判断流程。登录身份与签到客户端身份分开处理。
 - **森空岛二维码登录**：[nonebot-plugin-skland](https://github.com/FrostN0v0/nonebot-plugin-skland) 的 `scanId → scanCode → access token → cred/sign token` 流程。
 - **森空岛签到**：[skyland_auto_checkin](https://github.com/devnakx/skyland_auto_checkin) 的角色字段、签名输入、明日方舟与终末地 `/api/v1` 请求体和结果解析流程。
 
