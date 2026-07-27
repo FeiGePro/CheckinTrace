@@ -145,8 +145,7 @@ internal object SklandCheckInFailurePolicy {
     fun isSafeToRetry(error: Throwable): Boolean = when (error) {
         is UnknownHostException,
         is ConnectException,
-        is NoRouteToHostException,
-        -> true
+        is NoRouteToHostException -> true
 
         else -> false
     }
