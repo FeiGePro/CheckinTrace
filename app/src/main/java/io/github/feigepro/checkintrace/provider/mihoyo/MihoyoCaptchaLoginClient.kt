@@ -33,11 +33,11 @@ class MihoyoAigisRequiredException(
 ) : IllegalStateException(message)
 
 /**
- * 米游社 Android 短信验证码登录。
+ * 米游社次要登录流程。
  *
- * 流程来自 MiyoQian 当前实现：手机号与区号先使用通行证 RSA 公钥加密，
- * createLoginCaptcha 返回 action_type，随后 loginByMobileCaptcha 返回 stoken/mid/aid，
- * 最后将 stoken 换成签到所需的 cookie_token。
+ * 完整采用 README 所列 MiyoQian 的 Android 短信验证码流程：RSA 加密手机号、
+ * createLoginCaptcha、AIGIS、loginByMobileCaptcha、stoken 换 cookie_token。
+ * 成功后再使用与主二维码相同的 deviceLogin/saveDevice 流程登记本机 Android 设备。
  */
 class MihoyoCaptchaLoginClient(
     private val client: OkHttpClient = defaultClient(),
@@ -45,6 +45,7 @@ class MihoyoCaptchaLoginClient(
     private val random: SecureRandom = SecureRandom(),
     private val deviceProfile: MihoyoDeviceProfile = MihoyoDeviceProfile.current(),
     private val deviceIdentity: MihoyoDeviceIdentity = MihoyoQrLoginClient.generateDeviceIdentity(),
+    private val deviceRegistrationApi: MihoyoDeviceRegistrationApi = MihoyoDeviceRegistrationApi(),
 ) {
     suspend fun sendCaptcha(
         phone: String,
@@ -120,8 +121,7 @@ class MihoyoCaptchaLoginClient(
 
             val cookieToken = exchangeCookieToken(stoken, mid)
             check(cookieToken.isNotBlank()) { "stoken 换 cookie_token 失败：接口未返回 token" }
-            DevLogger.info("米游社/短信登录", "短信验证码登录与凭证交换成功", taskId)
-            MihoyoCredentialBundle(
+            val credential = MihoyoCredentialBundle(
                 accountId = accountId,
                 mid = mid,
                 stoken = stoken,
@@ -133,6 +133,9 @@ class MihoyoCaptchaLoginClient(
                 deviceName = deviceProfile.name,
                 systemVersion = deviceProfile.systemVersion,
             )
+            deviceRegistrationApi.register(credential, taskId).getOrThrow()
+            DevLogger.info("米游社/短信登录", "短信登录及 Android 设备注册成功", taskId)
+            credential
         }.onFailure {
             DevLogger.error("米游社/短信登录", it.message ?: "短信验证码登录失败", taskId)
         }
