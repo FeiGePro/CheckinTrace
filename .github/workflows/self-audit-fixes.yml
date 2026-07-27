@@ -1,0 +1,576 @@
+name: Apply self-audit fixes
+
+on:
+  push:
+    branches:
+      - feat/reliability-login-observability
+    paths:
+      - .github/workflows/self-audit-fixes.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/reliability-login-observability
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Apply audited fixes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{path}: expected one match, found {count}: {old[:100]!r}')
+              file.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          branch_root = Path('.')
+
+          # Remove duplicate launcher icon and obsolete Skland login Activity declaration.
+          manifest = Path('app/src/main/AndroidManifest.xml')
+          manifest.write_text('''<?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="false"
+                  android:dataExtractionRules="@xml/data_extraction_rules"
+                  android:fullBackupContent="@xml/backup_rules"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="@string/app_name"
+                  android:roundIcon="@mipmap/ic_launcher_round"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.CheckinTrace"
+                  android:usesCleartextTraffic="false">
+                  <activity
+                      android:name=".MihoyoCaptchaLoginActivity"
+                      android:exported="false" />
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          '''.replace('          ', ''), encoding='utf-8')
+
+          # Main screen: Android SMS is primary; QR is an explicitly labelled compatibility option.
+          main_activity = 'app/src/main/java/io/github/feigepro/checkintrace/MainActivity.kt'
+          replace_once(main_activity,
+              'import android.Manifest\nimport android.app.TimePickerDialog\nimport android.content.pm.PackageManager\n',
+              'import android.Manifest\nimport android.app.Activity\nimport android.app.TimePickerDialog\nimport android.content.Intent\nimport android.content.pm.PackageManager\n')
+          replace_once(main_activity,
+              'import androidx.activity.ComponentActivity\nimport androidx.activity.compose.setContent\n',
+              'import androidx.activity.ComponentActivity\nimport androidx.activity.compose.rememberLauncherForActivityResult\nimport androidx.activity.compose.setContent\nimport androidx.activity.result.contract.ActivityResultContracts\n')
+          replace_once(main_activity,
+              '    val context = LocalContext.current\n    var showAvailable by rememberSaveable { mutableStateOf(false) }\n',
+              '''    val context = LocalContext.current
+              val mihoyoSmsLogin = rememberLauncherForActivityResult(
+                  ActivityResultContracts.StartActivityForResult(),
+              ) { result ->
+                  if (result.resultCode == Activity.RESULT_OK) model.refreshLoginStates()
+              }
+              var showAvailable by rememberSaveable { mutableStateOf(false) }
+              '''.replace('              ', ''))
+          replace_once(main_activity,
+              '''                AccountPanel(
+                      state.mihoyoLoggedIn,
+                      state.sklandLoggedIn,
+                      loginEnabled,
+                      model::beginMihoyoLogin,
+                      model::beginSklandLogin,
+                  )
+              '''.replace('              ', ''),
+              '''                AccountPanel(
+                      mihoyoLoggedIn = state.mihoyoLoggedIn,
+                      sklandLoggedIn = state.sklandLoggedIn,
+                      enabled = loginEnabled,
+                      onMihoyoSmsLogin = {
+                          mihoyoSmsLogin.launch(Intent(context, MihoyoCaptchaLoginActivity::class.java))
+                      },
+                      onMihoyoQrLogin = model::beginMihoyoQrLogin,
+                      onSklandLogin = model::beginSklandLogin,
+                  )
+              '''.replace('              ', ''))
+          replace_once(main_activity,
+              '                    enabled = !state.busy && state.selected.isNotEmpty(),\n',
+              '                    enabled = loginEnabled && state.selected.isNotEmpty(),\n')
+          old_account_panel = '''@Composable
+          private fun AccountPanel(
+              mihoyoLoggedIn: Boolean,
+              sklandLoggedIn: Boolean,
+              enabled: Boolean,
+              onMihoyoLogin: () -> Unit,
+              onSklandLogin: () -> Unit,
+          ) {
+              Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
+                  Column {
+                      AccountRow("米游社", mihoyoLoggedIn, enabled, onMihoyoLogin)
+                      HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                      AccountRow("森空岛", sklandLoggedIn, enabled, onSklandLogin)
+                  }
+              }
+          }
+          '''.replace('          ', '')
+          new_account_panel = '''@Composable
+          private fun AccountPanel(
+              mihoyoLoggedIn: Boolean,
+              sklandLoggedIn: Boolean,
+              enabled: Boolean,
+              onMihoyoSmsLogin: () -> Unit,
+              onMihoyoQrLogin: () -> Unit,
+              onSklandLogin: () -> Unit,
+          ) {
+              Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
+                  Column {
+                      MihoyoAccountRow(
+                          loggedIn = mihoyoLoggedIn,
+                          enabled = enabled,
+                          onSmsLogin = onMihoyoSmsLogin,
+                          onQrLogin = onMihoyoQrLogin,
+                      )
+                      HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                      AccountRow("森空岛", sklandLoggedIn, enabled, onSklandLogin)
+                  }
+              }
+          }
+
+          @Composable
+          private fun MihoyoAccountRow(
+              loggedIn: Boolean,
+              enabled: Boolean,
+              onSmsLogin: () -> Unit,
+              onQrLogin: () -> Unit,
+          ) {
+              Column(
+                  Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
+                  verticalArrangement = Arrangement.spacedBy(10.dp),
+              ) {
+                  Row(
+                      Modifier.fillMaxWidth(),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(12.dp),
+                  ) {
+                      Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                          Text("米游社", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                          Row(
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.spacedBy(7.dp),
+                          ) {
+                              Surface(
+                                  modifier = Modifier.size(8.dp),
+                                  shape = RoundedCornerShape(50),
+                                  color = if (loggedIn) Color(0xFF28A66A) else MaterialTheme.colorScheme.outline,
+                              ) {}
+                              Text(
+                                  if (loggedIn) "已连接" else "尚未登录",
+                                  style = MaterialTheme.typography.bodySmall,
+                                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                              )
+                          }
+                          Text(
+                              "推荐短信登录：使用 Android 米游社客户端身份",
+                              style = MaterialTheme.typography.bodySmall,
+                              color = MaterialTheme.colorScheme.onSurfaceVariant,
+                          )
+                      }
+                  }
+                  Row(
+                      Modifier.fillMaxWidth(),
+                      horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                  ) {
+                      TextButton(onClick = onQrLogin, enabled = enabled) { Text("扫码（兼容）") }
+                      Button(onClick = onSmsLogin, enabled = enabled) { Text("短信登录") }
+                  }
+              }
+          }
+          '''.replace('          ', '')
+          replace_once(main_activity, old_account_panel, new_account_panel)
+
+          # Main view model: honest QR wording, refresh state after SMS Activity, and no dead login callbacks.
+          vm = 'app/src/main/java/io/github/feigepro/checkintrace/MainViewModel.kt'
+          replace_once(vm,
+              'import io.github.feigepro.checkintrace.provider.skland.SklandCredentialBundle\n',
+              '')
+          replace_once(vm,
+              '''    fun refreshAutoCheckInStatus() {
+                  _state.value = _state.value.copy(autoCheckInSnapshot = autoCheckInStatusStore.load())
+              }
+
+              fun beginMihoyoLogin() {
+              '''.replace('              ', ''),
+              '''    fun refreshAutoCheckInStatus() {
+                  _state.value = _state.value.copy(autoCheckInSnapshot = autoCheckInStatusStore.load())
+              }
+
+              fun refreshLoginStates() {
+                  _state.value = _state.value.copy(
+                      mihoyoLoggedIn = repository.loadMihoyo(DEFAULT_ACCOUNT) != null,
+                      sklandLoggedIn = repository.loadSkland(DEFAULT_ACCOUNT) != null,
+                  )
+              }
+
+              fun beginMihoyoQrLogin() {
+              '''.replace('              ', ''))
+          replace_once(vm,
+              '_state.value = _state.value.copy(busy = true, qrStatus = "正在创建米游社登录二维码……")',
+              '_state.value = _state.value.copy(busy = true, qrStatus = "正在创建米游社兼容扫码二维码……")')
+          replace_once(vm,
+              '                qrStatus = "请使用米游社扫码并确认登录。平台可能显示“另一台电脑/设备登录”，这是二维码授权的通用提示",\n',
+              '                qrStatus = "兼容扫码不是 Android 短信登录；仅在你明确选择扫码时使用。请用米游社扫码并确认。",\n')
+          replace_once(vm,
+              '                    qrStatus = "已扫码，请在米游社中确认登录。“另一台电脑/设备”是平台的通用授权提示",\n',
+              '                    qrStatus = "已扫码，请在米游社中确认。该通道不等同于 Android 短信登录。",\n')
+          dead_skland_methods = '''    fun saveSklandCredential(
+              accessToken: String,
+              cred: String?,
+              signToken: String?,
+              userId: String?,
+          ) {
+              if (accessToken.isBlank()) return
+              repository.saveSkland(
+                  DEFAULT_ACCOUNT,
+                  SklandCredentialBundle(
+                      accessToken = accessToken,
+                      cred = cred,
+                      signToken = signToken,
+                      userId = userId,
+                  ),
+              )
+              _state.value = _state.value.copy(
+                  sklandLoggedIn = true,
+                  output = listOf("${nowLabel()} 森空岛登录与会话凭证已加密保存"),
+              )
+          }
+
+              fun saveSklandToken(token: String) {
+              if (token.isBlank()) return
+              val existing = repository.loadSkland(DEFAULT_ACCOUNT)
+              val completeExistingSession = existing?.accessToken == token &&
+                  !existing.cred.isNullOrBlank() &&
+                  !existing.signToken.isNullOrBlank()
+              if (!completeExistingSession) repository.saveSklandToken(DEFAULT_ACCOUNT, token)
+              _state.value = _state.value.copy(
+                  sklandLoggedIn = true,
+                  output = listOf("${nowLabel()} 森空岛登录与会话凭证已加密保存"),
+              )
+          }
+
+          '''.replace('              ', '')
+          replace_once(vm, dead_skland_methods, '')
+          replace_once(vm,
+              '    fun runSelectedCheckIns() {\n        if (_state.value.busy) return\n',
+              '    fun runSelectedCheckIns() {\n        if (_state.value.busy || _state.value.qrSession != null || _state.value.sklandQrSession != null) return\n')
+
+          # SMS login becomes an internal Activity that returns to the existing main screen.
+          sms = 'app/src/main/java/io/github/feigepro/checkintrace/MihoyoCaptchaLoginActivity.kt'
+          replace_once(sms, 'import android.content.Intent\n', '')
+          replace_once(sms,
+              '''                        repository.saveMihoyo(DEFAULT_ACCOUNT, credential)
+                          setResult(RESULT_OK)
+                          startActivity(
+                              Intent(this, MainActivity::class.java)
+                                  .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                          )
+                          finish()
+              '''.replace('              ', ''),
+              '''                        repository.saveMihoyo(DEFAULT_ACCOUNT, credential)
+                          setResult(RESULT_OK)
+                          finish()
+              '''.replace('              ', ''))
+
+          # Use the official scanUrl returned by Hypergryph and stop hiding API errors as "waiting".
+          skland_qr = Path('app/src/main/java/io/github/feigepro/checkintrace/provider/skland/SklandQrLoginClient.kt')
+          skland_qr.write_text('''package io.github.feigepro.checkintrace.provider.skland
+
+          import io.github.feigepro.checkintrace.logging.DevLogger
+          import java.util.concurrent.TimeUnit
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import kotlinx.serialization.builtins.serializer
+          import kotlinx.serialization.json.Json
+          import kotlinx.serialization.json.JsonObject
+          import kotlinx.serialization.json.jsonObject
+          import kotlinx.serialization.json.jsonPrimitive
+          import okhttp3.MediaType.Companion.toMediaType
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import okhttp3.RequestBody.Companion.toRequestBody
+
+          data class SklandQrSession(
+              val scanId: String,
+              val qrContent: String,
+          )
+
+          sealed interface SklandQrPollResult {
+              data object Waiting : SklandQrPollResult
+              data class Confirmed(val token: String) : SklandQrPollResult
+          }
+
+          class SklandQrLoginClient(
+              private val client: OkHttpClient = defaultClient(),
+              private val json: Json = Json { ignoreUnknownKeys = true },
+          ) {
+              suspend fun create(taskId: String? = null): Result<SklandQrSession> = withContext(Dispatchers.IO) {
+                  runCatching {
+                      val root = postJson(GENERATE_URL, "{\\"appCode\\":\\"$APP_CODE\\"}")
+                      requireSuccess(root, "获取登录二维码失败")
+                      val data = root["data"]?.jsonObject ?: error("二维码接口未返回 data")
+                      val scanId = data["scanId"]?.jsonPrimitive?.content.orEmpty()
+                      val scanUrl = data["scanUrl"]?.jsonPrimitive?.content.orEmpty()
+                      check(scanId.isNotBlank()) { "二维码接口未返回 scanId" }
+                      val content = scanUrl.ifBlank { "hypergryph://scan_login?scanId=$scanId" }
+                      DevLogger.info("森空岛/登录", "二维码创建成功", taskId)
+                      SklandQrSession(scanId, content)
+                  }.onFailure { DevLogger.error("森空岛/登录", it.message ?: "二维码创建失败", taskId) }
+              }
+
+              suspend fun poll(session: SklandQrSession, taskId: String? = null): Result<SklandQrPollResult> =
+                  withContext(Dispatchers.IO) {
+                      runCatching {
+                          val url = okhttp3.HttpUrl.Builder()
+                              .scheme("https")
+                              .host("as.hypergryph.com")
+                              .addPathSegments("general/v1/scan_status")
+                              .addQueryParameter("scanId", session.scanId)
+                              .build()
+                          val root = executeJson(Request.Builder().url(url).get().build())
+                          requireSuccess(root, "查询二维码状态失败")
+                          val scanCode = root["data"]?.jsonObject?.get("scanCode")?.jsonPrimitive?.content.orEmpty()
+                          if (scanCode.isBlank()) return@runCatching SklandQrPollResult.Waiting
+                          DevLogger.info("森空岛/登录", "扫码确认成功，开始交换登录凭证", taskId)
+                          val tokenRoot = postJson(TOKEN_URL, "{\\"scanCode\\":${jsonString(scanCode)}}")
+                          requireSuccess(tokenRoot, "扫码登录凭证交换失败")
+                          val token = tokenRoot["data"]?.jsonObject?.get("token")?.jsonPrimitive?.content.orEmpty()
+                          check(token.isNotBlank()) { "扫码登录凭证交换结果缺少 token" }
+                          SklandQrPollResult.Confirmed(token)
+                      }.onFailure { DevLogger.error("森空岛/登录", it.message ?: "轮询失败", taskId) }
+                  }
+
+              private fun postJson(url: String, body: String): JsonObject = executeJson(
+                  Request.Builder().url(url).post(body.toRequestBody(JSON_MEDIA_TYPE)).build(),
+              )
+
+              private fun executeJson(request: Request): JsonObject = client.newCall(request).execute().use { response ->
+                  val raw = response.body?.string().orEmpty()
+                  check(response.isSuccessful) { "HTTP ${response.code}" }
+                  check(raw.isNotBlank()) { "接口返回空内容" }
+                  json.parseToJsonElement(raw).jsonObject
+              }
+
+              private fun requireSuccess(root: JsonObject, prefix: String) {
+                  val status = root["status"]?.jsonPrimitive?.content?.toIntOrNull()
+                  check(status == 0) {
+                      "$prefix：${root["msg"]?.jsonPrimitive?.content ?: root["message"]?.jsonPrimitive?.content ?: "未知错误"}"
+                  }
+              }
+
+              private fun jsonString(value: String): String = json.encodeToString(String.serializer(), value)
+
+              companion object {
+                  private const val APP_CODE = "4ca99fa6b56cc2ba"
+                  private const val GENERATE_URL = "https://as.hypergryph.com/general/v1/gen_scan/login"
+                  private const val TOKEN_URL = "https://as.hypergryph.com/user/auth/v1/token_by_scan_code"
+                  private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+                  private fun defaultClient() = OkHttpClient.Builder()
+                      .connectTimeout(10, TimeUnit.SECONDS)
+                      .readTimeout(10, TimeUnit.SECONDS)
+                      .writeTimeout(10, TimeUnit.SECONDS)
+                      .build()
+              }
+          }
+          '''.replace('          ', ''), encoding='utf-8')
+
+          # Persist roles whose POST may already have started, including process-death recovery.
+          status_file = 'app/src/main/java/io/github/feigepro/checkintrace/AutoCheckInStatus.kt'
+          replace_once(status_file,
+              '    val completedRoleKeys: Set<String> = emptySet(),\n)',
+              '    val completedRoleKeys: Set<String> = emptySet(),\n    val submittedRoleKeys: Set<String> = emptySet(),\n)')
+
+          worker = 'app/src/main/java/io/github/feigepro/checkintrace/AutoCheckInWorker.kt'
+          replace_once(worker,
+              '''        val completedRoleKeys = if (
+                  runAttemptCount > 0 && previousSnapshot?.state == AutoCheckInRunState.RETRY_SCHEDULED
+              ) {
+                  previousSnapshot.completedRoleKeys.toMutableSet()
+              } else {
+                  mutableSetOf()
+              }
+          '''.replace('          ', ''),
+              '''        val shouldRestoreProgress = runAttemptCount > 0 && previousSnapshot?.state in setOf(
+                  AutoCheckInRunState.RUNNING,
+                  AutoCheckInRunState.RETRY_SCHEDULED,
+              )
+              val completedRoleKeys = if (shouldRestoreProgress) {
+                  previousSnapshot?.completedRoleKeys.orEmpty().toMutableSet()
+              } else {
+                  mutableSetOf()
+              }
+              val submittedRoleKeys = if (shouldRestoreProgress) {
+                  previousSnapshot?.submittedRoleKeys.orEmpty().toMutableSet()
+              } else {
+                  mutableSetOf()
+              }
+          '''.replace('          ', ''))
+          replace_once(worker,
+              '                completedRoleKeys = completedRoleKeys,\n            ),\n',
+              '                completedRoleKeys = completedRoleKeys,\n                submittedRoleKeys = submittedRoleKeys,\n            ),\n')
+          replace_once(worker,
+              '''                        if (runAttemptCount > 0 && roleKey in completedRoleKeys) {
+                              lines += timestamped("$label：已在上次尝试完成，本次跳过")
+                              continue
+                          }
+
+                          requestPacer.awaitTurn()
+                          lines += timestamped("$label：开始请求")
+                          saveProgress(statusStore, startedAt, scheduledTimeLabel, attempt, lines, completedRoleKeys)
+              '''.replace('              ', ''),
+              '''                        if (runAttemptCount > 0 && (roleKey in completedRoleKeys || roleKey in submittedRoleKeys)) {
+                              val reason = if (roleKey in completedRoleKeys) {
+                                  "已在上次尝试完成"
+                              } else {
+                                  "上次尝试已开始提交但结果未知"
+                              }
+                              lines += timestamped("$label：$reason，本次跳过")
+                              continue
+                          }
+
+                          requestPacer.awaitTurn()
+                          submittedRoleKeys += roleKey
+                          lines += timestamped("$label：开始请求")
+                          saveProgress(
+                              statusStore,
+                              startedAt,
+                              scheduledTimeLabel,
+                              attempt,
+                              lines,
+                              completedRoleKeys,
+                              submittedRoleKeys,
+                          )
+              '''.replace('              ', ''))
+          replace_once(worker,
+              '                                if (result.retryable) hasRetryableFailure = true\n',
+              '''                                if (result.retryable) {
+                                      submittedRoleKeys -= roleKey
+                                      hasRetryableFailure = true
+                                  }
+              '''.replace('              ', ''))
+          replace_once(worker,
+              '                        saveProgress(statusStore, startedAt, scheduledTimeLabel, attempt, lines, completedRoleKeys)\n',
+              '''                        saveProgress(
+                              statusStore,
+                              startedAt,
+                              scheduledTimeLabel,
+                              attempt,
+                              lines,
+                              completedRoleKeys,
+                              submittedRoleKeys,
+                          )
+              '''.replace('              ', ''))
+          replace_once(worker,
+              '                completedRoleKeys = completedRoleKeys,\n            )\n            statusStore.save(snapshot)\n',
+              '                completedRoleKeys = completedRoleKeys,\n                submittedRoleKeys = submittedRoleKeys,\n            )\n            statusStore.save(snapshot)\n')
+          replace_once(worker,
+              '                completedRoleKeys = completedRoleKeys,\n            )\n            runCatching { statusStore.save(snapshot) }\n',
+              '                completedRoleKeys = completedRoleKeys,\n                submittedRoleKeys = submittedRoleKeys,\n            )\n            runCatching { statusStore.save(snapshot) }\n')
+          replace_once(worker,
+              '''        lines: List<String>,
+              completedRoleKeys: Set<String>,
+          ) {
+          '''.replace('          ', ''),
+              '''        lines: List<String>,
+              completedRoleKeys: Set<String>,
+              submittedRoleKeys: Set<String>,
+          ) {
+          '''.replace('          ', ''))
+          replace_once(worker,
+              '                completedRoleKeys = completedRoleKeys.toSet(),\n            ),\n',
+              '                completedRoleKeys = completedRoleKeys.toSet(),\n                submittedRoleKeys = submittedRoleKeys.toSet(),\n            ),\n')
+          replace_once(worker,
+              '已完成或结果未知的角色不会重复请求',
+              '已完成、结果未知或已开始提交的角色不会重复请求')
+          replace_once(worker,
+              '已完成或结果未知的角色不会重复请求',
+              '已完成、结果未知或已开始提交的角色不会重复请求')
+
+          # Remove obsolete Activity now that QR is rendered in MainActivity.
+          obsolete = Path('app/src/main/java/io/github/feigepro/checkintrace/SklandLoginActivity.kt')
+          if obsolete.exists():
+              obsolete.unlink()
+
+          # Serialization regression coverage for process-death protection.
+          Path('app/src/test/java/io/github/feigepro/checkintrace/AutoCheckInSnapshotTest.kt').write_text('''package io.github.feigepro.checkintrace
+
+          import kotlinx.serialization.decodeFromString
+          import kotlinx.serialization.encodeToString
+          import kotlinx.serialization.json.Json
+          import org.junit.Assert.assertEquals
+          import org.junit.Assert.assertTrue
+          import org.junit.Test
+
+          class AutoCheckInSnapshotTest {
+              private val json = Json { ignoreUnknownKeys = true }
+
+              @Test
+              fun `submitted role keys survive serialization`() {
+                  val snapshot = AutoCheckInSnapshot(
+                      state = AutoCheckInRunState.RUNNING,
+                      startedAtEpochMillis = 1L,
+                      completedRoleKeys = setOf("done"),
+                      submittedRoleKeys = setOf("done", "possibly-sent"),
+                  )
+
+                  val decoded = json.decodeFromString<AutoCheckInSnapshot>(json.encodeToString(snapshot))
+
+                  assertEquals(snapshot, decoded)
+              }
+
+              @Test
+              fun `legacy snapshots default submitted roles to empty`() {
+                  val decoded = json.decodeFromString<AutoCheckInSnapshot>(
+                      """{"state":"RUNNING","startedAtEpochMillis":1,"completedRoleKeys":["done"]}""",
+                  )
+
+                  assertEquals(setOf("done"), decoded.completedRoleKeys)
+                  assertTrue(decoded.submittedRoleKeys.isEmpty())
+              }
+          }
+          '''.replace('          ', ''), encoding='utf-8')
+          PY
+
+      - name: Test and build
+        run: |
+          chmod +x ./gradlew
+          ./gradlew testDebugUnitTest assembleDebug assembleRelease --console=plain
+
+      - name: Commit audited fixes
+        shell: bash
+        run: |
+          rm .github/workflows/self-audit-fixes.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: align login UX and retry safety"
+          git push origin HEAD:feat/reliability-login-observability
