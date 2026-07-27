@@ -80,15 +80,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun beginMihoyoLogin() {
         if (_state.value.busy) return
         viewModelScope.launch {
-            _state.value = _state.value.copy(busy = true, qrStatus = "正在创建游戏登录二维码……")
-            val session = qrClient.createGameQr().getOrElse {
+            _state.value = _state.value.copy(busy = true, qrStatus = "正在创建米游社登录二维码……")
+            // 游戏 SDK 二维码在当前平台接口上会在确认阶段返回 decode err，
+            // 因此默认使用已经验证可工作的米游社通行证二维码链路。
+            val session = qrClient.createPassportQr().getOrElse {
                 _state.value = _state.value.copy(busy = false, qrStatus = "二维码创建失败：${it.message}")
                 return@launch
             }
             _state.value = _state.value.copy(
                 busy = false,
                 qrSession = session,
-                qrStatus = "推荐方式：游戏扫码登录。请使用米游社扫描并确认原神登录授权",
+                qrStatus = "请使用米游社扫码并确认登录。平台可能显示“另一台电脑/设备登录”，这是二维码授权的通用提示",
             )
             pollMihoyoQr(session)
         }
@@ -103,7 +105,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (_state.value.qrSession?.ticket != session.ticket) return
             when (val result = qrClient.queryQr(session).getOrElse { MihoyoQrState.Failed(it.message ?: "查询失败") }) {
                 MihoyoQrState.Waiting -> _state.value = _state.value.copy(qrStatus = "等待扫码……")
-                MihoyoQrState.Scanned -> _state.value = _state.value.copy(qrStatus = "已扫码，请在米游社中确认游戏登录")
+                MihoyoQrState.Scanned -> _state.value = _state.value.copy(
+                    qrStatus = "已扫码，请在米游社中确认登录。“另一台电脑/设备”是平台的通用授权提示",
+                )
                 is MihoyoQrState.Confirmed -> {
                     _state.value = _state.value.copy(qrStatus = "正在交换并安全保存签到凭证……")
                     val credential = qrClient.exchangeCredential(session, result).getOrElse {
@@ -114,7 +118,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _state.value = _state.value.copy(
                         mihoyoLoggedIn = true,
                         qrSession = null,
-                        qrStatus = "米游社游戏扫码登录成功",
+                        qrStatus = "米游社登录成功",
                     )
                     return
                 }
