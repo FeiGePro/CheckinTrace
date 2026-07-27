@@ -29,14 +29,23 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
     override suspend fun doWork(): Result {
         val taskId = DevLogger.newTaskId()
         val statusStore = AutoCheckInStatusStore(applicationContext)
+        val previousSnapshot = statusStore.load()
         val startedAt = System.currentTimeMillis()
         val attempt = runAttemptCount + 1
+        val completedRoleKeys = if (
+            runAttemptCount > 0 && previousSnapshot?.state == AutoCheckInRunState.RETRY_SCHEDULED
+        ) {
+            previousSnapshot.completedRoleKeys.toMutableSet()
+        } else {
+            mutableSetOf()
+        }
         statusStore.save(
             AutoCheckInSnapshot(
                 state = AutoCheckInRunState.RUNNING,
                 startedAtEpochMillis = startedAt,
                 attempt = attempt,
                 lines = listOf("自动签到正在执行"),
+                completedRoleKeys = completedRoleKeys,
             ),
         )
 
@@ -109,15 +118,23 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                     }
 
                     for (role in roles) {
-                        requestPacer.awaitTurn()
                         val label = "${game.displayName} · ${role.nickname}"
+                        val roleKey = autoCheckInRoleKey(game.id, role.uid, role.extra)
+                        if (runAttemptCount > 0 && roleKey in completedRoleKeys) {
+                            lines += "$label：已在上次尝试完成，本次跳过"
+                            continue
+                        }
+
+                        requestPacer.awaitTurn()
                         when (val result = provider.checkIn(game, role)) {
                             is CheckInResult.Success -> {
+                                completedRoleKeys += roleKey
                                 lines += "$label：${safeMessage(result.message)}"
                                 DevLogger.info("自动任务/${game.displayName}", result.message, taskId)
                             }
 
                             CheckInResult.AlreadyCheckedIn -> {
+                                completedRoleKeys += roleKey
                                 lines += "$label：今日已签到"
                                 DevLogger.info("自动任务/${game.displayName}", "今日已签到", taskId)
                             }
@@ -147,7 +164,7 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                 runAttemptCount = runAttemptCount,
             )
             if (decision.shouldRetry) {
-                lines += "检测到临时错误，将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次"
+                lines += "检测到临时错误，将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次；已完成角色不会重复请求"
             }
             val snapshot = AutoCheckInSnapshot(
                 state = decision.state,
@@ -155,6 +172,7 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                 finishedAtEpochMillis = System.currentTimeMillis(),
                 attempt = attempt,
                 lines = lines.ifEmpty { listOf("自动签到已完成") },
+                completedRoleKeys = completedRoleKeys,
             )
             statusStore.save(snapshot)
             if (!decision.shouldRetry && decision.state in NOTIFIABLE_FAILURE_STATES) {
@@ -174,13 +192,14 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                 hasRetryableFailure = true,
                 runAttemptCount = runAttemptCount,
             )
-            if (decision.shouldRetry) lines += "将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次"
+            if (decision.shouldRetry) lines += "将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次；已完成角色不会重复请求"
             val snapshot = AutoCheckInSnapshot(
                 state = decision.state,
                 startedAtEpochMillis = startedAt,
                 finishedAtEpochMillis = System.currentTimeMillis(),
                 attempt = attempt,
                 lines = lines,
+                completedRoleKeys = completedRoleKeys,
             )
             runCatching { statusStore.save(snapshot) }
             if (!decision.shouldRetry) AutoCheckInNotifier.notifyFailure(applicationContext, snapshot)
@@ -206,6 +225,11 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
         val ACTION_REQUIRED_CODES = setOf("CAPTCHA_REQUIRED", "AUTH_REQUIRED", "FIRST_BIND_REQUIRED")
         val NOTIFIABLE_FAILURE_STATES = setOf(AutoCheckInRunState.FAILED, AutoCheckInRunState.ACTION_REQUIRED)
     }
+}
+
+internal fun autoCheckInRoleKey(gameId: String, uid: String, extra: Map<String, String>): String {
+    val extraPart = extra.toSortedMap().entries.joinToString("&") { (key, value) -> "$key=$value" }
+    return "$gameId|$uid|$extraPart"
 }
 
 data class DailyCheckInTime(val hour: Int, val minute: Int) {

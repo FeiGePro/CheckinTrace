@@ -22,6 +22,7 @@ data class AutoCheckInSnapshot(
     val finishedAtEpochMillis: Long? = null,
     val attempt: Int = 1,
     val lines: List<String> = emptyList(),
+    val completedRoleKeys: Set<String> = emptySet(),
 )
 
 class AutoCheckInStatusStore(context: Context) {
