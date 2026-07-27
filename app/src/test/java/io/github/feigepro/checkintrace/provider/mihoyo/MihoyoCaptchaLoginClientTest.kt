@@ -9,6 +9,7 @@ class MihoyoCaptchaLoginClientTest {
     fun `normalizes mainland phone formats`() {
         assertEquals("13800138000", MihoyoCaptchaLoginClient.normalizeCnPhone("138 0013 8000"))
         assertEquals("13800138000", MihoyoCaptchaLoginClient.normalizeCnPhone("+86 138-0013-8000"))
+        assertEquals("13800138000", MihoyoCaptchaLoginClient.normalizeCnPhone("8613800138000"))
     }
 
     @Test
