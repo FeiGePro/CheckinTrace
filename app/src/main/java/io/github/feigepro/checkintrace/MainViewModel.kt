@@ -205,13 +205,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         while (System.currentTimeMillis() - createdAtEpochMillis < PendingLoginSessionStore.SKLAND_QR_TTL_MILLIS) {
             if (_state.value.sklandQrSession?.scanId != session.scanId) return
             delay(2_000)
-            val result = sklandQrClient.poll(session, taskId).getOrElse { error ->
+            val pollResult = sklandQrClient.poll(session, taskId)
+            if (pollResult.isFailure) {
+                val error = pollResult.exceptionOrNull()
                 _state.value = _state.value.copy(
-                    sklandQrStatus = "二维码仍已保留；轮询暂时失败，正在自动继续（${error.message ?: "网络异常"}）",
+                    sklandQrStatus = "二维码仍已保留；轮询暂时失败，正在自动继续（${error?.message ?: "网络异常"}）",
                 )
                 continue
             }
-            when (result) {
+            when (val result = pollResult.getOrThrow()) {
                 SklandQrPollResult.Waiting -> _state.value = _state.value.copy(
                     sklandQrStatus = "等待扫码并确认……截图、切换应用或页面重建都不会更换二维码",
                 )
