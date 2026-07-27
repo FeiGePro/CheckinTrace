@@ -36,7 +36,7 @@ data class MihoyoQrSession(
     val ticket: String,
     val deviceId: String,
     val deviceFp: String,
-    val method: MihoyoLoginMethod = MihoyoLoginMethod.GAME_QR,
+    val method: MihoyoLoginMethod = MihoyoLoginMethod.PASSPORT_QR,
 )
 
 sealed interface MihoyoQrState {
@@ -77,8 +77,8 @@ data class MihoyoCredentialBundle(
 }
 
 /**
- * 默认采用游戏 SDK 二维码登录：二维码授权只产生短期 game_token，再交换签到所需凭证。
- * 通行证二维码实现保留为协议备用，但不会在默认流程中自动切换，避免用户在不知情时改变授权类型。
+ * 默认采用米游社通行证二维码登录。游戏 SDK 二维码实现仅作为实验性协议参考保留；
+ * 2026 年 6 月起，多个开源项目反馈该链路在用户确认时返回 unexpected end of JSON input。
  */
 class MihoyoQrLoginClient(
     private val client: OkHttpClient = defaultClient(),
@@ -87,7 +87,7 @@ class MihoyoQrLoginClient(
     private val deviceProfile: MihoyoDeviceProfile = MihoyoDeviceProfile.current(),
     private val deviceIdentity: MihoyoDeviceIdentity = generateDeviceIdentity(),
 ) {
-    suspend fun createQr(taskId: String? = null): Result<MihoyoQrSession> = createGameQr(taskId)
+    suspend fun createQr(taskId: String? = null): Result<MihoyoQrSession> = createPassportQr(taskId)
 
     suspend fun createGameQr(taskId: String? = null): Result<MihoyoQrSession> = withContext(Dispatchers.IO) {
         runCatching {
