@@ -84,13 +84,20 @@ class SklandLoginActivity : Activity() {
                 }) {
                     SklandQrPollResult.Waiting -> Unit
                     is SklandQrPollResult.Confirmed -> {
-                        status.text = "已确认，正在验证森空岛凭证……"
-                        SklandApi().exchangeToken(result.token, taskId).getOrElse {
+                        status.text = "已确认，正在验证并保存森空岛凭证……"
+                        val credential = SklandApi().exchangeToken(result.token, taskId).getOrElse {
                             showFailure("登录凭证验证失败：${it.message}")
                             return@launch
                         }
                         DevLogger.info("森空岛/登录", "登录成功", taskId)
-                        setResult(RESULT_OK, Intent().putExtra(EXTRA_TOKEN, result.token))
+                        setResult(
+                            RESULT_OK,
+                            Intent()
+                                .putExtra(EXTRA_TOKEN, credential.accessToken)
+                                .putExtra(EXTRA_CRED, credential.cred)
+                                .putExtra(EXTRA_SIGN_TOKEN, credential.signToken)
+                                .putExtra(EXTRA_USER_ID, credential.userId),
+                        )
                         finish()
                         return@launch
                     }
@@ -120,5 +127,10 @@ class SklandLoginActivity : Activity() {
         super.onDestroy()
     }
 
-    companion object { const val EXTRA_TOKEN = "skland_token" }
+    companion object {
+        const val EXTRA_TOKEN = "skland_token"
+        const val EXTRA_CRED = "skland_cred"
+        const val EXTRA_SIGN_TOKEN = "skland_sign_token"
+        const val EXTRA_USER_ID = "skland_user_id"
+    }
 }
