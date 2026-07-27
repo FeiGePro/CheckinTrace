@@ -292,7 +292,7 @@ class MihoyoQrLoginClient(
             randomNumber = random.nextInt(100_001) + 100_000,
         )
         return Headers.Builder()
-            .add("User-Agent", deviceProfile.userAgent(PASSPORT_APP_VERSION))
+            .add("User-Agent", PASSPORT_APP_UA)
             .add("Accept", "*/*")
             .add("Accept-Language", "zh-cn")
             .add("x-rpc-client_type", "3")
@@ -365,6 +365,7 @@ class MihoyoQrLoginClient(
             "https://passport-api.mihoyo.com/account/auth/api/getCookieAccountInfoBySToken"
         private const val PASSPORT_APP_ID = "bll8iq97cem8"
         private const val PASSPORT_APP_VERSION = "2.90.1"
+        private const val PASSPORT_APP_UA = "Mozilla/5.0 miHoYoBBS/2.90.1 Capture/2.2.0"
         private const val BBS_VERSION = "2.106.2"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
