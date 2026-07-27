@@ -32,37 +32,35 @@ class SklandProvider(
         val app = applications.map { it.jsonObject }
             .firstOrNull { it.string("appCode") == game.appCode }
             ?: return@runCatching emptyList()
-        val bindings = app["bindingList"]?.jsonArray ?: JsonArray(emptyList())
+        val bindingItems = app["bindingList"]?.jsonArray ?: JsonArray(emptyList())
         when (game.appCode) {
-            "arknights" -> bindings.mapNotNull { parseArknightsRole(game.id, it.jsonObject) }
-            "endfield" -> bindings.flatMap { parseEndfieldRoles(game.id, it.jsonObject) }
+            "arknights" -> bindingItems.mapNotNull { parseArknightsRole(game.id, it.jsonObject) }
+            "endfield" -> bindingItems.flatMap { parseEndfieldRoles(game.id, it.jsonObject) }
             else -> emptyList()
         }
     }
 
     override suspend fun checkIn(game: GameDefinition, role: GameRole): CheckInResult {
-        val request: suspend (SklandSession) -> Result<JsonObject> = { currentSession ->
-            when (game.appCode) {
-                "arknights" -> {
-                    val channelMasterId = role.extra["channelMasterId"]
-                        ?: return CheckInResult.Failure("ROLE_INVALID", "角色缺少 channelMasterId")
-                    api.checkInArknights(role.uid, channelMasterId, currentSession)
-                }
-                "endfield" -> {
-                    val roleId = role.extra["roleId"]
-                        ?: return CheckInResult.Failure("ROLE_INVALID", "终末地角色缺少 roleId")
-                    val serverId = role.extra["serverId"]
-                        ?: return CheckInResult.Failure("ROLE_INVALID", "终末地角色缺少 serverId")
-                    api.checkInEndfield(roleId, serverId, currentSession)
-                }
-                else -> return CheckInResult.Failure("GAME_UNSUPPORTED", "暂不支持 ${game.displayName}")
+        val request: suspend (SklandSession) -> Result<JsonObject> = when (game.appCode) {
+            "arknights" -> {
+                val channelMasterId = role.extra["channelMasterId"]
+                    ?: return CheckInResult.Failure("ROLE_INVALID", "角色缺少 channelMasterId")
+                { currentSession -> api.checkInArknights(role.uid, channelMasterId, currentSession) }
             }
+            "endfield" -> {
+                val roleId = role.extra["roleId"]
+                    ?: return CheckInResult.Failure("ROLE_INVALID", "终末地角色缺少 roleId")
+                val serverId = role.extra["serverId"]
+                    ?: return CheckInResult.Failure("ROLE_INVALID", "终末地角色缺少 serverId")
+                { currentSession -> api.checkInEndfield(roleId, serverId, currentSession) }
+            }
+            else -> return CheckInResult.Failure("GAME_UNSUPPORTED", "暂不支持 ${game.displayName}")
         }
 
-        var response = ensureSession().fold(
-            onSuccess = { request(it) },
-            onFailure = { return CheckInResult.Failure("AUTH_REQUIRED", it.message ?: "请先完成森空岛登录") },
-        )
+        val initialSession = ensureSession().getOrElse {
+            return CheckInResult.Failure("AUTH_REQUIRED", it.message ?: "请先完成森空岛登录")
+        }
+        var response = request(initialSession)
         val needsRecovery = response.exceptionOrNull() is SklandAuthException ||
             response.getOrNull()?.let(SklandAttendanceResponse::isAuthRequired) == true
         if (needsRecovery) {
