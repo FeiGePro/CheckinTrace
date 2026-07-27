@@ -21,7 +21,9 @@ import io.github.feigepro.checkintrace.security.CredentialRepository
 import io.github.feigepro.checkintrace.security.EncryptedCredentialStore
 import java.io.IOException
 import java.time.Duration
+import java.time.LocalTime
 import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 
@@ -32,6 +34,11 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
         val previousSnapshot = statusStore.load()
         val startedAt = System.currentTimeMillis()
         val attempt = runAttemptCount + 1
+        val scheduledTimeLabel = if (runAttemptCount > 0) {
+            previousSnapshot?.scheduledTimeLabel ?: AutoCheckInScheduler.currentTime(applicationContext).label
+        } else {
+            AutoCheckInScheduler.currentTime(applicationContext).label
+        }
         val completedRoleKeys = if (
             runAttemptCount > 0 && previousSnapshot?.state == AutoCheckInRunState.RETRY_SCHEDULED
         ) {
@@ -43,8 +50,9 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
             AutoCheckInSnapshot(
                 state = AutoCheckInRunState.RUNNING,
                 startedAtEpochMillis = startedAt,
+                scheduledTimeLabel = scheduledTimeLabel,
                 attempt = attempt,
-                lines = listOf("自动签到正在执行"),
+                lines = listOf(timestamped("自动签到正在执行")),
                 completedRoleKeys = completedRoleKeys,
             ),
         )
@@ -58,7 +66,9 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
             val games = GameCatalog.builtIn.filter { it.id in selected }
             val providers = mapOf(
                 ProviderType.MIHOYO to repository.loadMihoyo(DEFAULT_ACCOUNT)?.let(::MihoyoProvider),
-                ProviderType.SKLAND to repository.loadSklandToken(DEFAULT_ACCOUNT)?.let(::SklandProvider),
+                ProviderType.SKLAND to repository.loadSkland(DEFAULT_ACCOUNT)?.let { credential ->
+                    SklandProvider(credential, onCredentialUpdated = { repository.saveSkland(DEFAULT_ACCOUNT, it) })
+                },
             )
             var hasFailures = false
             var requiresAction = false
@@ -66,12 +76,12 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
             val requestPacer = CheckInRequestPacer()
 
             DevLogger.info("自动任务", "每日签到开始，已选 ${games.size} 个游戏，第 $attempt 次尝试", taskId)
-            if (games.isEmpty()) lines += "没有选择需要自动签到的游戏"
+            if (games.isEmpty()) lines += timestamped("没有选择需要自动签到的游戏")
 
             for ((type, providerGames) in games.groupBy { it.provider }) {
                 val provider = providers[type]
                 if (provider == null) {
-                    lines += "${providerName(type)}：尚未登录"
+                    lines += timestamped("${providerName(type)}：尚未登录")
                     hasFailures = true
                     requiresAction = true
                     continue
@@ -81,14 +91,10 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                 if (validation.isFailure) {
                     val error = validation.exceptionOrNull()
                     val message = safeMessage(error?.message ?: "登录验证失败")
-                    lines += "${providerName(type)}：登录验证失败（$message）"
+                    lines += timestamped("${providerName(type)}：登录验证失败（$message）")
                     DevLogger.warn("自动任务", "${providerName(type)} 登录验证失败，本次跳过", taskId)
                     hasFailures = true
-                    if (isTransientError(error)) {
-                        hasRetryableFailure = true
-                    } else {
-                        requiresAction = true
-                    }
+                    if (isTransientError(error)) hasRetryableFailure = true else requiresAction = true
                     continue
                 }
 
@@ -99,20 +105,16 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                     if (roleResult.isFailure) {
                         val error = roleResult.exceptionOrNull()
                         val message = safeMessage(error?.message ?: "角色读取失败")
-                        lines += "${game.displayName}：读取角色失败（$message）"
+                        lines += timestamped("${game.displayName}：读取角色失败（$message）")
                         DevLogger.error("自动任务/${game.displayName}", message, taskId)
                         hasFailures = true
-                        if (isTransientError(error)) {
-                            hasRetryableFailure = true
-                        } else {
-                            requiresAction = true
-                        }
+                        if (isTransientError(error)) hasRetryableFailure = true else requiresAction = true
                         continue
                     }
 
                     val roles = roleResult.getOrThrow()
                     if (roles.isEmpty()) {
-                        lines += "${game.displayName}：没有找到绑定角色"
+                        lines += timestamped("${game.displayName}：没有找到绑定角色")
                         hasFailures = true
                         continue
                     }
@@ -121,38 +123,47 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                         val label = "${game.displayName} · ${role.nickname}"
                         val roleKey = autoCheckInRoleKey(game.id, role.uid, role.extra)
                         if (runAttemptCount > 0 && roleKey in completedRoleKeys) {
-                            lines += "$label：已在上次尝试完成，本次跳过"
+                            lines += timestamped("$label：已在上次尝试完成，本次跳过")
                             continue
                         }
 
                         requestPacer.awaitTurn()
+                        lines += timestamped("$label：开始请求")
+                        saveProgress(statusStore, startedAt, scheduledTimeLabel, attempt, lines, completedRoleKeys)
                         when (val result = provider.checkIn(game, role)) {
                             is CheckInResult.Success -> {
                                 completedRoleKeys += roleKey
-                                lines += "$label：${safeMessage(result.message)}"
+                                lines += timestamped("$label：${safeMessage(result.message)}")
                                 DevLogger.info("自动任务/${game.displayName}", result.message, taskId)
                             }
 
                             CheckInResult.AlreadyCheckedIn -> {
                                 completedRoleKeys += roleKey
-                                lines += "$label：今日已签到"
+                                lines += timestamped("$label：今日已签到")
                                 DevLogger.info("自动任务/${game.displayName}", "今日已签到", taskId)
+                            }
+
+                            is CheckInResult.Unknown -> {
+                                lines += timestamped("$label：结果未知（${safeMessage(result.message)}）")
+                                DevLogger.warn("自动任务/${game.displayName}", result.message, taskId)
+                                hasFailures = true
                             }
 
                             is CheckInResult.Failure -> {
                                 val message = safeMessage(result.message)
-                                lines += "$label：失败（$message）"
+                                lines += timestamped("$label：失败（$message）")
                                 DevLogger.warn("自动任务/${game.displayName}", message, taskId)
                                 hasFailures = true
                                 if (result.retryable) hasRetryableFailure = true
                                 if (result.code in ACTION_REQUIRED_CODES) requiresAction = true
                                 if (result.code == "CAPTCHA_REQUIRED") {
-                                    lines += "检测到人工验证要求，已停止${providerName(type)}后续请求"
+                                    lines += timestamped("检测到人工验证要求，已停止${providerName(type)}后续请求")
                                     stopProvider = true
                                     break
                                 }
                             }
                         }
+                        saveProgress(statusStore, startedAt, scheduledTimeLabel, attempt, lines, completedRoleKeys)
                     }
                 }
             }
@@ -164,14 +175,15 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                 runAttemptCount = runAttemptCount,
             )
             if (decision.shouldRetry) {
-                lines += "检测到临时错误，将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次；已完成角色不会重复请求"
+                lines += timestamped("检测到临时错误，将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次；已完成角色不会重复请求")
             }
             val snapshot = AutoCheckInSnapshot(
                 state = decision.state,
                 startedAtEpochMillis = startedAt,
                 finishedAtEpochMillis = System.currentTimeMillis(),
+                scheduledTimeLabel = scheduledTimeLabel,
                 attempt = attempt,
-                lines = lines.ifEmpty { listOf("自动签到已完成") },
+                lines = lines.ifEmpty { listOf(timestamped("自动签到已完成")) },
                 completedRoleKeys = completedRoleKeys,
             )
             statusStore.save(snapshot)
@@ -184,7 +196,7 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
             throw cancelled
         } catch (error: Exception) {
             val message = safeMessage(error.message ?: error.javaClass.simpleName)
-            lines += "自动任务异常（$message）"
+            lines += timestamped("自动任务异常（$message）")
             DevLogger.error("自动任务", message, taskId)
             val decision = decideAutoCheckInCompletion(
                 hasFailures = true,
@@ -192,11 +204,12 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                 hasRetryableFailure = true,
                 runAttemptCount = runAttemptCount,
             )
-            if (decision.shouldRetry) lines += "将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次；已完成角色不会重复请求"
+            if (decision.shouldRetry) lines += timestamped("将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次；已完成角色不会重复请求")
             val snapshot = AutoCheckInSnapshot(
                 state = decision.state,
                 startedAtEpochMillis = startedAt,
                 finishedAtEpochMillis = System.currentTimeMillis(),
+                scheduledTimeLabel = scheduledTimeLabel,
                 attempt = attempt,
                 lines = lines,
                 completedRoleKeys = completedRoleKeys,
@@ -205,6 +218,26 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
             if (!decision.shouldRetry) AutoCheckInNotifier.notifyFailure(applicationContext, snapshot)
             if (decision.shouldRetry) Result.retry() else Result.success()
         }
+    }
+
+    private fun saveProgress(
+        store: AutoCheckInStatusStore,
+        startedAt: Long,
+        scheduledTimeLabel: String,
+        attempt: Int,
+        lines: List<String>,
+        completedRoleKeys: Set<String>,
+    ) {
+        store.save(
+            AutoCheckInSnapshot(
+                state = AutoCheckInRunState.RUNNING,
+                startedAtEpochMillis = startedAt,
+                scheduledTimeLabel = scheduledTimeLabel,
+                attempt = attempt,
+                lines = lines.toList(),
+                completedRoleKeys = completedRoleKeys.toSet(),
+            ),
+        )
     }
 
     private fun safeMessage(message: String): String = LogRedactor.redact(message)
@@ -217,13 +250,15 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
             Regex("HTTP (429|5\\d\\d)").containsMatchIn(message)
     }
 
-    private fun providerName(type: ProviderType): String =
-        if (type == ProviderType.MIHOYO) "米游社" else "森空岛"
+    private fun providerName(type: ProviderType): String = if (type == ProviderType.MIHOYO) "米游社" else "森空岛"
 
     private companion object {
         const val DEFAULT_ACCOUNT = "default"
         val ACTION_REQUIRED_CODES = setOf("CAPTCHA_REQUIRED", "AUTH_REQUIRED", "FIRST_BIND_REQUIRED")
         val NOTIFIABLE_FAILURE_STATES = setOf(AutoCheckInRunState.FAILED, AutoCheckInRunState.ACTION_REQUIRED)
+        val TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+
+        fun timestamped(message: String): String = "${TIME_FORMATTER.format(LocalTime.now())} $message"
     }
 }
 
