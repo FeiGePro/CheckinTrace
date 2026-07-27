@@ -6,7 +6,7 @@ import org.junit.Test
 
 class SklandSignerTest {
     @Test
-    fun signingIsDeterministic() {
+    fun signingMatchesSkylandAutoCheckinVector() {
         val first = SklandSigner.sign(
             path = "/api/v1/game/attendance",
             bodyOrQuery = "{\"uid\":\"123\",\"gameId\":1}",
@@ -21,8 +21,8 @@ class SklandSignerTest {
         )
 
         assertEquals(first, second)
-        assertEquals("1699999999", first.timestamp)
-        assertEquals("4f297728549f5425e739e80f71a384f5", first.sign)
+        assertEquals("1699999998", first.timestamp)
+        assertEquals("e7286b247fe1cb2a805d8a85cbf2677b", first.sign)
     }
 
     @Test
