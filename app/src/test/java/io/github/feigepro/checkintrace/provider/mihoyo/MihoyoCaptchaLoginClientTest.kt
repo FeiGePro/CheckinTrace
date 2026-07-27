@@ -13,7 +13,7 @@ class MihoyoCaptchaLoginClientTest {
     }
 
     @Test
-    fun `rejects invalid phone before any network request`() {
+    fun `rejects invalid phone`() {
         assertThrows(IllegalArgumentException::class.java) {
             MihoyoCaptchaLoginClient.normalizeCnPhone("12345")
         }
