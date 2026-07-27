@@ -16,6 +16,8 @@ import io.github.feigepro.checkintrace.logging.DevLogger
 import io.github.feigepro.checkintrace.provider.skland.SklandApi
 import io.github.feigepro.checkintrace.provider.skland.SklandQrLoginClient
 import io.github.feigepro.checkintrace.provider.skland.SklandQrPollResult
+import io.github.feigepro.checkintrace.security.CredentialRepository
+import io.github.feigepro.checkintrace.security.EncryptedCredentialStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -89,7 +91,9 @@ class SklandLoginActivity : Activity() {
                             showFailure("登录凭证验证失败：${it.message}")
                             return@launch
                         }
-                        DevLogger.info("森空岛/登录", "登录成功", taskId)
+                        CredentialRepository(EncryptedCredentialStore(this@SklandLoginActivity))
+                            .saveSkland(DEFAULT_ACCOUNT, credential)
+                        DevLogger.info("森空岛/登录", "登录成功，会话凭证已加密保存", taskId)
                         setResult(
                             RESULT_OK,
                             Intent()
@@ -132,5 +136,6 @@ class SklandLoginActivity : Activity() {
         const val EXTRA_CRED = "skland_cred"
         const val EXTRA_SIGN_TOKEN = "skland_sign_token"
         const val EXTRA_USER_ID = "skland_user_id"
+        private const val DEFAULT_ACCOUNT = "default"
     }
 }
