@@ -13,6 +13,7 @@ import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoProvider
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrLoginClient
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrSession
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrState
+import io.github.feigepro.checkintrace.provider.skland.SklandCredentialBundle
 import io.github.feigepro.checkintrace.provider.skland.SklandProvider
 import io.github.feigepro.checkintrace.security.CredentialRepository
 import io.github.feigepro.checkintrace.security.EncryptedCredentialStore
@@ -127,10 +128,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = _state.value.copy(qrSession = null, qrStatus = "二维码已超时，请重新获取")
     }
 
+    fun saveSklandCredential(
+        accessToken: String,
+        cred: String?,
+        signToken: String?,
+        userId: String?,
+    ) {
+        if (accessToken.isBlank()) return
+        repository.saveSkland(
+            DEFAULT_ACCOUNT,
+            SklandCredentialBundle(
+                accessToken = accessToken,
+                cred = cred,
+                signToken = signToken,
+                userId = userId,
+            ),
+        )
+        _state.value = _state.value.copy(
+            sklandLoggedIn = true,
+            output = listOf("${nowLabel()} 森空岛登录与会话凭证已加密保存"),
+        )
+    }
+
     fun saveSklandToken(token: String) {
-        if (token.isBlank()) return
-        repository.saveSklandToken(DEFAULT_ACCOUNT, token)
-        _state.value = _state.value.copy(sklandLoggedIn = true, output = listOf("${nowLabel()} 森空岛登录信息已加密保存"))
+        saveSklandCredential(token, null, null, null)
     }
 
     fun runSelectedCheckIns() {
