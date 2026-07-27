@@ -1,0 +1,56 @@
+name: Build miHoYo QR debug APK
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Apply QR app id test patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="app/src/main/java/io/github/feigepro/checkintrace/provider/mihoyo/MihoyoQrLoginClient.kt"
+          sed -i 's/private const val PASSPORT_APP_ID = "bll8iq97cem8"/private const val PASSPORT_APP_ID = "ddxf5dufpuyo"/' "$FILE"
+          grep -F 'private const val PASSPORT_APP_ID = "ddxf5dufpuyo"' "$FILE"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Grant Gradle wrapper execute permission
+        run: chmod +x ./gradlew
+
+      - name: Test and build Debug APK
+        run: ./gradlew testDebugUnitTest assembleDebug
+
+      - name: Prepare APK
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp app/build/outputs/apk/debug/app-debug.apk artifact/CheckinTrace-mihoyo-qr-app-id-debug.apk
+          sha256sum artifact/CheckinTrace-mihoyo-qr-app-id-debug.apk > artifact/CheckinTrace-mihoyo-qr-app-id-debug.apk.sha256
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CheckinTrace-mihoyo-qr-app-id-debug
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 7
