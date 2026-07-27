@@ -9,6 +9,8 @@ import android.os.Looper
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
@@ -17,11 +19,16 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -30,6 +37,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -50,8 +58,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoAigisRequiredException
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoCaptchaLoginClient
+import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoCredentialBundle
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrLoginClient
 import io.github.feigepro.checkintrace.security.CredentialRepository
 import io.github.feigepro.checkintrace.security.EncryptedCredentialStore
@@ -100,7 +111,7 @@ private enum class PendingCaptchaAction { SEND, LOGIN }
 @Composable
 private fun MihoyoCaptchaLoginScreen(
     client: MihoyoCaptchaLoginClient,
-    onCredentialReady: (io.github.feigepro.checkintrace.provider.mihoyo.MihoyoCredentialBundle) -> Unit,
+    onCredentialReady: (MihoyoCredentialBundle) -> Unit,
     onClose: () -> Unit,
 ) {
     var phone by rememberSaveable { mutableStateOf("") }
@@ -176,7 +187,12 @@ private fun MihoyoCaptchaLoginScreen(
         },
     ) { padding ->
         Column(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .imePadding()
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Card(Modifier.fillMaxWidth()) {
@@ -238,11 +254,11 @@ private fun MihoyoCaptchaLoginScreen(
             ) {
                 if (busy) {
                     CircularProgressIndicator(
-                        modifier = Modifier.height(18.dp),
+                        modifier = Modifier.width(18.dp).height(18.dp),
                         strokeWidth = 2.dp,
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
-                    Spacer(Modifier.padding(horizontal = 5.dp))
+                    Spacer(Modifier.width(10.dp))
                 }
                 Text("登录并保存签到凭证")
             }
@@ -254,41 +270,41 @@ private fun MihoyoCaptchaLoginScreen(
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
-
-            pendingAigis?.let { rawAigis ->
-                AigisVerificationPanel(
-                    rawAigis = rawAigis,
-                    onSolved = { token ->
-                        val action = pendingAction
-                        pendingAigis = null
-                        pendingAction = null
-                        scope.launch {
-                            when (action) {
-                                PendingCaptchaAction.SEND -> sendCaptcha(token)
-                                PendingCaptchaAction.LOGIN -> completeLogin(token)
-                                null -> Unit
-                            }
-                        }
-                    },
-                    onCancel = {
-                        pendingAigis = null
-                        pendingAction = null
-                        status = "安全验证已取消"
-                    },
-                    onFailure = {
-                        pendingAigis = null
-                        pendingAction = null
-                        status = "安全验证失败：$it"
-                    },
-                )
-            }
         }
+    }
+
+    pendingAigis?.let { rawAigis ->
+        AigisVerificationDialog(
+            rawAigis = rawAigis,
+            onSolved = { token ->
+                val action = pendingAction
+                pendingAigis = null
+                pendingAction = null
+                scope.launch {
+                    when (action) {
+                        PendingCaptchaAction.SEND -> sendCaptcha(token)
+                        PendingCaptchaAction.LOGIN -> completeLogin(token)
+                        null -> Unit
+                    }
+                }
+            },
+            onCancel = {
+                pendingAigis = null
+                pendingAction = null
+                status = "安全验证已取消"
+            },
+            onFailure = {
+                pendingAigis = null
+                pendingAction = null
+                status = "安全验证失败：$it"
+            },
+        )
     }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun AigisVerificationPanel(
+private fun AigisVerificationDialog(
     rawAigis: String,
     onSolved: (String) -> Unit,
     onCancel: () -> Unit,
@@ -298,46 +314,87 @@ private fun AigisVerificationPanel(
     val bridge = remember(rawAigis) { AigisJavascriptBridge(onSolved, onFailure) }
     var webView by remember(rawAigis) { mutableStateOf<WebView?>(null) }
 
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false,
+        ),
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.96f)
+                .fillMaxHeight(0.9f),
+            shape = MaterialTheme.shapes.large,
+            tonalElevation = 6.dp,
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("官方安全验证", fontWeight = FontWeight.Bold)
-                TextButton(onClick = onCancel) { Text("取消") }
-            }
-            AndroidView(
-                factory = {
-                    WebView(context).apply {
-                        webView = this
-                        setBackgroundColor(Color.TRANSPARENT)
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.allowFileAccess = false
-                        settings.allowContentAccess = false
-                        CookieManager.getInstance().setAcceptCookie(true)
-                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                        webChromeClient = WebChromeClient()
-                        webViewClient = WebViewClient()
-                        addJavascriptInterface(bridge, "AndroidBridge")
-                        loadDataWithBaseURL(
-                            "https://user.miyoushe.com/",
-                            buildAigisHtml(rawAigis),
-                            "text/html",
-                            "UTF-8",
-                            null,
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text("米游社官方安全验证", fontWeight = FontWeight.Bold)
+                        Text(
+                            "验证控件由极验官方服务加载",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                },
-                modifier = Modifier.fillMaxWidth().height(360.dp),
-            )
+                    TextButton(onClick = onCancel) { Text("取消") }
+                }
+
+                AndroidView(
+                    factory = {
+                        WebView(context).apply {
+                            webView = this
+                            setBackgroundColor(Color.WHITE)
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.databaseEnabled = true
+                            settings.loadsImagesAutomatically = true
+                            settings.javaScriptCanOpenWindowsAutomatically = true
+                            settings.allowFileAccess = false
+                            settings.allowContentAccess = false
+                            settings.userAgentString = "${settings.userAgentString} miHoYoBBS/2.106.2"
+                            CookieManager.getInstance().setAcceptCookie(true)
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            webChromeClient = WebChromeClient()
+                            webViewClient = object : WebViewClient() {
+                                override fun onReceivedError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    error: WebResourceError?,
+                                ) {
+                                    if (request?.isForMainFrame == true) {
+                                        bridge.failed(error?.description?.toString().orEmpty())
+                                    }
+                                }
+                            }
+                            addJavascriptInterface(bridge, "AndroidBridge")
+                            loadDataWithBaseURL(
+                                "https://user.miyoushe.com/",
+                                buildMihoyoAigisHtml(rawAigis),
+                                "text/html",
+                                "UTF-8",
+                                null,
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                )
+            }
         }
     }
 
     DisposableEffect(rawAigis) {
         onDispose {
+            webView?.stopLoading()
             webView?.removeJavascriptInterface("AndroidBridge")
             webView?.destroy()
         }
@@ -361,7 +418,7 @@ private class AigisJavascriptBridge(
     }
 }
 
-private fun buildAigisHtml(rawAigis: String): String {
+internal fun buildMihoyoAigisHtml(rawAigis: String): String {
     val encoded = Base64.getEncoder().encodeToString(rawAigis.toByteArray(Charsets.UTF_8))
     return """
         <!doctype html>
@@ -372,9 +429,30 @@ private fun buildAigisHtml(rawAigis: String): String {
           <script src="https://static.geetest.com/static/js/gt.0.4.9.js"></script>
           <script src="https://static.geetest.com/v4/gt4.js"></script>
           <style>
-            html,body { margin:0; padding:0; background:transparent; font-family:sans-serif; }
-            #box { min-height:320px; display:flex; align-items:center; justify-content:center; }
-            #message { padding:16px; color:#666; text-align:center; }
+            html, body {
+              width: 100%;
+              height: 100%;
+              margin: 0;
+              padding: 0;
+              overflow: hidden;
+              background: #ffffff;
+              font-family: sans-serif;
+            }
+            #box {
+              width: 100%;
+              height: 100%;
+              min-height: 360px;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              box-sizing: border-box;
+              padding: 12px;
+            }
+            #message {
+              color: #666;
+              text-align: center;
+              line-height: 1.6;
+            }
           </style>
         </head>
         <body>
@@ -383,45 +461,83 @@ private fun buildAigisHtml(rawAigis: String): String {
             const decodeUtf8 = value => decodeURIComponent(escape(atob(value)));
             const aigis = JSON.parse(decodeUtf8("$encoded"));
             const data = typeof aigis.data === "string" ? JSON.parse(aigis.data) : (aigis.data || {});
-            const fail = message => AndroidBridge.failed(String(message || "安全验证失败"));
+            let completed = false;
+
+            const fail = message => {
+              if (completed) return;
+              completed = true;
+              AndroidBridge.failed(String(message || "安全验证失败"));
+            };
+
             const finish = validate => {
-              if (!validate) { fail("安全验证未返回结果"); return; }
+              if (completed) return;
+              if (!validate) {
+                fail("安全验证未返回结果");
+                return;
+              }
+              completed = true;
               const json = JSON.stringify(validate);
               const payload = btoa(unescape(encodeURIComponent(json)));
               AndroidBridge.solved(String(aigis.session_id || "") + ";" + payload);
             };
+
+            window.onerror = (message, source, line, column, error) => {
+              fail(error && error.message ? error.message : String(message));
+              return true;
+            };
+
+            window.addEventListener("unhandledrejection", event => {
+              const reason = event && event.reason;
+              fail(reason && reason.message ? reason.message : String(reason || "安全验证脚本执行失败"));
+            });
+
             window.addEventListener("load", () => {
-              document.getElementById("message").remove();
+              const message = document.getElementById("message");
+              if (message) message.remove();
+
               try {
                 if (Object.prototype.hasOwnProperty.call(data, "challenge")) {
-                  if (typeof window.initGeetest !== "function") { fail("极验 v3 脚本加载失败"); return; }
+                  if (typeof window.initGeetest !== "function") {
+                    fail("极验 v3 脚本加载失败");
+                    return;
+                  }
                   window.initGeetest({
                     gt: data.gt,
                     challenge: data.challenge,
                     offline: false,
                     new_captcha: true,
-                    product: "popup",
-                    width: "100%",
+                    product: "custom",
+                    area: "#box",
+                    width: "250px",
                     https: true
                   }, captcha => {
-                    captcha.onReady(() => captcha.verify());
+                    captcha.appendTo("#box");
                     captcha.onSuccess(() => finish(captcha.getValidate()));
                     captcha.onError(error => fail(JSON.stringify(error)));
-                    captcha.onClose(() => fail("安全验证已取消"));
+                    captcha.onClose(() => {
+                      const validate = captcha.getValidate();
+                      if (validate) finish(validate);
+                      else fail("安全验证已取消");
+                    });
                   });
                   return;
                 }
-                if (typeof window.initGeetest4 !== "function") { fail("极验 v4 脚本加载失败"); return; }
+
+                if (typeof window.initGeetest4 !== "function") {
+                  fail("极验 v4 脚本加载失败");
+                  return;
+                }
                 window.initGeetest4({
                   captchaId: data.gt,
                   riskType: data.risk_type,
                   product: "popup",
-                  nextWidth: "300px",
+                  nextWidth: "250px",
                   lang: "zho",
                   userInfo: JSON.stringify({ session_id: aigis.session_id }),
                   https: true,
                   protocol: "https"
                 }, captcha => {
+                  captcha.appendTo("#box");
                   captcha.onReady(() => captcha.showCaptcha());
                   captcha.onSuccess(() => finish(captcha.getValidate()));
                   captcha.onError(error => fail(JSON.stringify(error)));
