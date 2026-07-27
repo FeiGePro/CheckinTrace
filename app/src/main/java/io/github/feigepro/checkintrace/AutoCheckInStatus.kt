@@ -20,6 +20,7 @@ data class AutoCheckInSnapshot(
     val state: AutoCheckInRunState,
     val startedAtEpochMillis: Long,
     val finishedAtEpochMillis: Long? = null,
+    val scheduledTimeLabel: String? = null,
     val attempt: Int = 1,
     val lines: List<String> = emptyList(),
     val completedRoleKeys: Set<String> = emptySet(),
