@@ -144,6 +144,8 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                             }
 
                             is CheckInResult.Unknown -> {
+                                // 即使其它角色触发整轮重试，也不能再次提交这个结果不确定的角色。
+                                completedRoleKeys += roleKey
                                 lines += timestamped("$label：结果未知（${safeMessage(result.message)}）")
                                 DevLogger.warn("自动任务/${game.displayName}", result.message, taskId)
                                 hasFailures = true
@@ -175,7 +177,7 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                 runAttemptCount = runAttemptCount,
             )
             if (decision.shouldRetry) {
-                lines += timestamped("检测到临时错误，将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次；已完成角色不会重复请求")
+                lines += timestamped("检测到临时错误，将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次；已完成或结果未知的角色不会重复请求")
             }
             val snapshot = AutoCheckInSnapshot(
                 state = decision.state,
@@ -204,7 +206,7 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                 hasRetryableFailure = true,
                 runAttemptCount = runAttemptCount,
             )
-            if (decision.shouldRetry) lines += timestamped("将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次；已完成角色不会重复请求")
+            if (decision.shouldRetry) lines += timestamped("将在约 $RETRY_BACKOFF_HOURS 小时后自动重试一次；已完成或结果未知的角色不会重复请求")
             val snapshot = AutoCheckInSnapshot(
                 state = decision.state,
                 startedAtEpochMillis = startedAt,
