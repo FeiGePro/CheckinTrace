@@ -4,6 +4,9 @@ import io.github.feigepro.checkintrace.data.CheckInResult
 import io.github.feigepro.checkintrace.data.GameDefinition
 import io.github.feigepro.checkintrace.data.GameRole
 import io.github.feigepro.checkintrace.provider.CheckInProvider
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.UnknownHostException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
@@ -59,7 +62,15 @@ class SklandProvider(
         }
         return response.fold(
             onSuccess = SklandAttendanceResponse::parse,
-            onFailure = { CheckInResult.Failure("NETWORK_OR_PROTOCOL", it.message ?: "请求失败", true) },
+            onFailure = {
+                CheckInResult.Failure(
+                    code = "NETWORK_OR_PROTOCOL",
+                    message = it.message ?: "请求失败",
+                    // 签到 POST 的响应读取失败时，服务端可能已经完成签到。
+                    // 只在能确定请求尚未到达服务端的连接类错误上自动重试，避免重复提交。
+                    retryable = SklandCheckInFailurePolicy.isSafeToRetry(it),
+                )
+            },
         )
     }
 
@@ -102,10 +113,16 @@ class SklandProvider(
 
 internal object SklandAttendanceResponse {
     fun parse(response: JsonObject): CheckInResult {
-        val code = response.string("code")?.toIntOrNull()
+        // 森空岛不同接口/版本可能使用 code 或 status 表示结果码。
+        val code = response.int("code") ?: response.int("status")
         val message = response.string("message") ?: response.string("msg") ?: "未知响应"
         if (code == 0) return CheckInResult.Success("签到成功")
-        if (message.contains("重复签到") || message.contains("已签到") || message.contains("请勿重复")) {
+        if (
+            code == 10001 ||
+            message.contains("重复签到") ||
+            message.contains("已签到") ||
+            message.contains("请勿重复")
+        ) {
             return CheckInResult.AlreadyCheckedIn
         }
         if (code == 10000 || code == 10002) {
@@ -117,6 +134,20 @@ internal object SklandAttendanceResponse {
         )
     }
 
+    private fun JsonObject.int(key: String): Int? =
+        this[key]?.jsonPrimitive?.content?.toIntOrNull()
+
     private fun JsonObject.string(key: String): String? =
         this[key]?.jsonPrimitive?.content
+}
+
+internal object SklandCheckInFailurePolicy {
+    fun isSafeToRetry(error: Throwable): Boolean = when (error) {
+        is UnknownHostException,
+        is ConnectException,
+        is NoRouteToHostException,
+        -> true
+
+        else -> false
+    }
 }
