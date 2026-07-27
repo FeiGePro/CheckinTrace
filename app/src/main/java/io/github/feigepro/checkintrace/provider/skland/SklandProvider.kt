@@ -45,14 +45,16 @@ class SklandProvider(
             "arknights" -> {
                 val channelMasterId = role.extra["channelMasterId"]
                     ?: return CheckInResult.Failure("ROLE_INVALID", "角色缺少 channelMasterId")
-                { currentSession -> api.checkInArknights(role.uid, channelMasterId, currentSession) }
+                suspend fun(currentSession: SklandSession): Result<JsonObject> =
+                    api.checkInArknights(role.uid, channelMasterId, currentSession)
             }
             "endfield" -> {
                 val roleId = role.extra["roleId"]
                     ?: return CheckInResult.Failure("ROLE_INVALID", "终末地角色缺少 roleId")
                 val serverId = role.extra["serverId"]
                     ?: return CheckInResult.Failure("ROLE_INVALID", "终末地角色缺少 serverId")
-                { currentSession -> api.checkInEndfield(roleId, serverId, currentSession) }
+                suspend fun(currentSession: SklandSession): Result<JsonObject> =
+                    api.checkInEndfield(roleId, serverId, currentSession)
             }
             else -> return CheckInResult.Failure("GAME_UNSUPPORTED", "暂不支持 ${game.displayName}")
         }
