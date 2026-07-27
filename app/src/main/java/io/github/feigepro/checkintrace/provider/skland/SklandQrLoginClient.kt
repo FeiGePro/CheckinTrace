@@ -1,6 +1,7 @@
 package io.github.feigepro.checkintrace.provider.skland
 
 import io.github.feigepro.checkintrace.logging.DevLogger
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.serializer
@@ -12,17 +13,21 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
 
-data class SklandQrSession(val scanId: String) {
-    val qrContent: String get() = "hypergryph://scan_login?scanId=$scanId"
-}
+data class SklandQrSession(
+    val scanId: String,
+    val qrContent: String,
+)
 
 sealed interface SklandQrPollResult {
     data object Waiting : SklandQrPollResult
     data class Confirmed(val token: String) : SklandQrPollResult
 }
 
+/**
+ * 森空岛二维码登录完整采用 README 所列 nonebot-plugin-skland 流程：
+ * scanId/scanUrl -> scanCode -> access token。凭证交换由 SklandApi 独立完成。
+ */
 class SklandQrLoginClient(
     private val client: OkHttpClient = defaultClient(),
     private val json: Json = Json { ignoreUnknownKeys = true },
@@ -31,31 +36,44 @@ class SklandQrLoginClient(
         runCatching {
             val root = postJson(GENERATE_URL, "{\"appCode\":\"$APP_CODE\"}")
             requireSuccess(root, "获取登录二维码失败")
-            val scanId = root["data"]!!.jsonObject["scanId"]!!.jsonPrimitive.content
+            val data = root["data"]?.jsonObject ?: error("二维码接口未返回 data")
+            val scanId = data["scanId"]?.jsonPrimitive?.content.orEmpty()
+            val scanUrl = data["scanUrl"]?.jsonPrimitive?.content.orEmpty()
+            check(scanId.isNotBlank()) { "二维码接口未返回 scanId" }
+            val content = scanUrl.ifBlank { "hypergryph://scan_login?scanId=$scanId" }
             DevLogger.info("森空岛/登录", "二维码创建成功", taskId)
-            SklandQrSession(scanId)
-        }.onFailure { DevLogger.error("森空岛/登录", it.message ?: "二维码创建失败", taskId) }
+            SklandQrSession(scanId = scanId, qrContent = content)
+        }.onFailure {
+            DevLogger.error("森空岛/登录", it.message ?: "二维码创建失败", taskId)
+        }
     }
 
-    suspend fun poll(session: SklandQrSession, taskId: String? = null): Result<SklandQrPollResult> =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val url = okhttp3.HttpUrl.Builder()
-                    .scheme("https").host("as.hypergryph.com")
-                    .addPathSegments("general/v1/scan_status")
-                    .addQueryParameter("scanId", session.scanId).build()
-                val root = executeJson(Request.Builder().url(url).get().build())
-                val status = root["status"]?.jsonPrimitive?.content?.toIntOrNull()
-                if (status != 0) return@runCatching SklandQrPollResult.Waiting
-                val scanCode = root["data"]?.jsonObject?.get("scanCode")?.jsonPrimitive?.content
-                    ?: return@runCatching SklandQrPollResult.Waiting
-                DevLogger.info("森空岛/登录", "扫码确认成功，开始交换登录凭证", taskId)
-                val tokenRoot = postJson(TOKEN_URL, "{\"scanCode\":${jsonString(scanCode)}}")
-                requireSuccess(tokenRoot, "扫码登录凭证交换失败")
-                val token = tokenRoot["data"]!!.jsonObject["token"]!!.jsonPrimitive.content
-                SklandQrPollResult.Confirmed(token)
-            }.onFailure { DevLogger.error("森空岛/登录", it.message ?: "轮询失败", taskId) }
+    suspend fun poll(
+        session: SklandQrSession,
+        taskId: String? = null,
+    ): Result<SklandQrPollResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            val url = okhttp3.HttpUrl.Builder()
+                .scheme("https")
+                .host("as.hypergryph.com")
+                .addPathSegments("general/v1/scan_status")
+                .addQueryParameter("scanId", session.scanId)
+                .build()
+            val root = executeJson(Request.Builder().url(url).get().build())
+            requireSuccess(root, "查询二维码状态失败")
+            val scanCode = root["data"]?.jsonObject?.get("scanCode")?.jsonPrimitive?.content.orEmpty()
+            if (scanCode.isBlank()) return@runCatching SklandQrPollResult.Waiting
+
+            DevLogger.info("森空岛/登录", "扫码确认成功，开始交换 access token", taskId)
+            val tokenRoot = postJson(TOKEN_URL, "{\"scanCode\":${jsonString(scanCode)}}")
+            requireSuccess(tokenRoot, "扫码登录凭证交换失败")
+            val token = tokenRoot["data"]?.jsonObject?.get("token")?.jsonPrimitive?.content.orEmpty()
+            check(token.isNotBlank()) { "扫码登录凭证交换结果缺少 token" }
+            SklandQrPollResult.Confirmed(token)
+        }.onFailure {
+            DevLogger.error("森空岛/登录", it.message ?: "轮询失败", taskId)
         }
+    }
 
     private fun postJson(url: String, body: String): JsonObject = executeJson(
         Request.Builder().url(url).post(body.toRequestBody(JSON_MEDIA_TYPE)).build(),
