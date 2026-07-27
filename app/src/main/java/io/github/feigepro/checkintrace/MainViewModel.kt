@@ -16,6 +16,8 @@ import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrState
 import io.github.feigepro.checkintrace.provider.skland.SklandProvider
 import io.github.feigepro.checkintrace.security.CredentialRepository
 import io.github.feigepro.checkintrace.security.EncryptedCredentialStore
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -38,7 +40,10 @@ data class MainUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = CredentialRepository(EncryptedCredentialStore(application))
     private val autoCheckInStatusStore = AutoCheckInStatusStore(application)
-    private val qrClient = MihoyoQrLoginClient()
+    private val qrClient = MihoyoQrLoginClient(
+        deviceIdentity = repository.loadMihoyoDeviceIdentity()
+            ?: MihoyoQrLoginClient.generateDeviceIdentity().also(repository::saveMihoyoDeviceIdentity),
+    )
     private val preferences = application.getSharedPreferences("ui_settings", 0)
     private val initialSchedule = AutoCheckInScheduler.currentTime(application)
     private val _state = MutableStateFlow(
@@ -46,7 +51,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selected = preferences.getStringSet("selected_games", null)?.toSet()
                 ?: GameCatalog.builtIn.filter { it.enabledByDefault }.mapTo(mutableSetOf()) { it.id },
             mihoyoLoggedIn = repository.loadMihoyo(DEFAULT_ACCOUNT) != null,
-            sklandLoggedIn = repository.loadSklandToken(DEFAULT_ACCOUNT) != null,
+            sklandLoggedIn = repository.loadSkland(DEFAULT_ACCOUNT) != null,
             scheduleHour = initialSchedule.hour,
             scheduleMinute = initialSchedule.minute,
             autoCheckInSnapshot = autoCheckInStatusStore.load(),
@@ -74,12 +79,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun beginMihoyoLogin() {
         if (_state.value.busy) return
         viewModelScope.launch {
-            _state.value = _state.value.copy(busy = true, qrStatus = "正在创建二维码……")
-            val session = qrClient.createQr().getOrElse {
+            _state.value = _state.value.copy(busy = true, qrStatus = "正在创建游戏登录二维码……")
+            val session = qrClient.createGameQr().getOrElse {
                 _state.value = _state.value.copy(busy = false, qrStatus = "二维码创建失败：${it.message}")
                 return@launch
             }
-            _state.value = _state.value.copy(busy = false, qrSession = session, qrStatus = "请使用米游社扫描并确认")
+            _state.value = _state.value.copy(
+                busy = false,
+                qrSession = session,
+                qrStatus = "推荐方式：游戏扫码登录。请使用米游社扫描并确认原神登录授权",
+            )
             pollMihoyoQr(session)
         }
     }
@@ -93,15 +102,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (_state.value.qrSession?.ticket != session.ticket) return
             when (val result = qrClient.queryQr(session).getOrElse { MihoyoQrState.Failed(it.message ?: "查询失败") }) {
                 MihoyoQrState.Waiting -> _state.value = _state.value.copy(qrStatus = "等待扫码……")
-                MihoyoQrState.Scanned -> _state.value = _state.value.copy(qrStatus = "已扫码，请在米游社中确认")
+                MihoyoQrState.Scanned -> _state.value = _state.value.copy(qrStatus = "已扫码，请在米游社中确认游戏登录")
                 is MihoyoQrState.Confirmed -> {
-                    _state.value = _state.value.copy(qrStatus = "正在安全保存登录信息……")
+                    _state.value = _state.value.copy(qrStatus = "正在交换并安全保存签到凭证……")
                     val credential = qrClient.exchangeCredential(session, result).getOrElse {
                         _state.value = _state.value.copy(qrSession = null, qrStatus = "登录失败：${it.message}")
                         return
                     }
                     repository.saveMihoyo(DEFAULT_ACCOUNT, credential)
-                    _state.value = _state.value.copy(mihoyoLoggedIn = true, qrSession = null, qrStatus = "米游社登录成功")
+                    _state.value = _state.value.copy(
+                        mihoyoLoggedIn = true,
+                        qrSession = null,
+                        qrStatus = "米游社游戏扫码登录成功",
+                    )
                     return
                 }
                 is MihoyoQrState.Failed -> {
@@ -117,7 +130,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun saveSklandToken(token: String) {
         if (token.isBlank()) return
         repository.saveSklandToken(DEFAULT_ACCOUNT, token)
-        _state.value = _state.value.copy(sklandLoggedIn = true, output = listOf("森空岛登录信息已加密保存"))
+        _state.value = _state.value.copy(sklandLoggedIn = true, output = listOf("${nowLabel()} 森空岛登录信息已加密保存"))
     }
 
     fun runSelectedCheckIns() {
@@ -125,22 +138,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val taskId = DevLogger.newTaskId()
             val lines = mutableListOf<String>()
-            _state.value = _state.value.copy(busy = true, output = listOf("开始检查已选游戏……"))
+            _state.value = _state.value.copy(busy = true, output = listOf("${nowLabel()} 开始检查已选游戏……"))
             val games = GameCatalog.builtIn.filter { it.id in _state.value.selected }
             val providers = mapOf(
                 ProviderType.MIHOYO to repository.loadMihoyo(DEFAULT_ACCOUNT)?.let(::MihoyoProvider),
-                ProviderType.SKLAND to repository.loadSklandToken(DEFAULT_ACCOUNT)?.let(::SklandProvider),
+                ProviderType.SKLAND to repository.loadSkland(DEFAULT_ACCOUNT)?.let { credential ->
+                    SklandProvider(credential, onCredentialUpdated = { repository.saveSkland(DEFAULT_ACCOUNT, it) })
+                },
             )
             val requestPacer = CheckInRequestPacer()
             for ((providerType, providerGames) in games.groupBy { it.provider }) {
                 val provider = providers[providerType]
                 if (provider == null) {
-                    lines += "${providerName(providerType)}：尚未登录"
+                    lines += "${nowLabel()} ${providerName(providerType)}：尚未登录"
                     continue
                 }
                 val validation = provider.validateCredential()
                 if (validation.isFailure) {
-                    lines += "${providerName(providerType)}：登录验证失败（${validation.exceptionOrNull()?.message}）"
+                    lines += "${nowLabel()} ${providerName(providerType)}：登录验证失败（${validation.exceptionOrNull()?.message}）"
                     continue
                 }
                 var stopProvider = false
@@ -148,21 +163,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (stopProvider) break
                     val roleResult = provider.getRoles(game)
                     if (roleResult.isFailure) {
-                        lines += "${game.displayName}：读取角色失败（${roleResult.exceptionOrNull()?.message}）"
+                        lines += "${nowLabel()} ${game.displayName}：读取角色失败（${roleResult.exceptionOrNull()?.message}）"
                         continue
                     }
                     val roles = roleResult.getOrThrow()
-                    if (roles.isEmpty()) lines += "${game.displayName}：没有找到绑定角色"
+                    if (roles.isEmpty()) lines += "${nowLabel()} ${game.displayName}：没有找到绑定角色"
                     for (role in roles) {
                         val label = "${game.displayName} · ${role.nickname}"
                         requestPacer.awaitTurn()
+                        lines += "${nowLabel()} $label：开始请求"
+                        _state.value = _state.value.copy(output = lines.toList())
                         when (val result = provider.checkIn(game, role)) {
-                            is CheckInResult.Success -> lines += "$label：${result.message}"
-                            CheckInResult.AlreadyCheckedIn -> lines += "$label：今日已签到"
+                            is CheckInResult.Success -> lines += "${nowLabel()} $label：${result.message}"
+                            CheckInResult.AlreadyCheckedIn -> lines += "${nowLabel()} $label：今日已签到"
+                            is CheckInResult.Unknown -> lines += "${nowLabel()} $label：结果未知（${result.message}）"
                             is CheckInResult.Failure -> {
-                                lines += "$label：失败（${result.message}）"
+                                lines += "${nowLabel()} $label：失败（${result.message}）"
                                 if (result.code == "CAPTCHA_REQUIRED") {
-                                    lines += "检测到人工验证要求，已停止米游社后续请求"
+                                    lines += "${nowLabel()} 检测到人工验证要求，已停止${providerName(providerType)}后续请求"
                                     stopProvider = true
                                     break
                                 }
@@ -173,7 +191,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             DevLogger.info("任务", "签到测试结束，共 ${lines.size} 条结果", taskId)
-            _state.value = _state.value.copy(busy = false, output = lines.ifEmpty { listOf("没有选择游戏") })
+            _state.value = _state.value.copy(busy = false, output = lines.ifEmpty { listOf("${nowLabel()} 没有选择游戏") })
         }
     }
 
@@ -183,7 +201,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun nowLabel(): String = TIME_FORMATTER.format(LocalTime.now())
+
     private fun providerName(type: ProviderType) = if (type == ProviderType.MIHOYO) "米游社" else "森空岛"
 
-    private companion object { const val DEFAULT_ACCOUNT = "default" }
+    private companion object {
+        const val DEFAULT_ACCOUNT = "default"
+        val TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+    }
 }
