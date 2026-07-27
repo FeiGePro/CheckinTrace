@@ -24,7 +24,7 @@ internal class PendingLoginSessionStore(context: Context) {
             .putString(KEY_SKLAND_SCAN_ID, session.scanId)
             .putString(KEY_SKLAND_QR_CONTENT, session.qrContent)
             .putLong(KEY_SKLAND_CREATED_AT, createdAtEpochMillis)
-            .apply()
+            .commit()
     }
 
     fun loadSkland(nowEpochMillis: Long = System.currentTimeMillis()): PendingSklandQrSession? {
@@ -53,7 +53,7 @@ internal class PendingLoginSessionStore(context: Context) {
             .remove(KEY_SKLAND_SCAN_ID)
             .remove(KEY_SKLAND_QR_CONTENT)
             .remove(KEY_SKLAND_CREATED_AT)
-            .apply()
+            .commit()
     }
 
     companion object {
