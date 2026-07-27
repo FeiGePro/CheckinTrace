@@ -58,14 +58,15 @@ class SklandProvider(
 
         suspend fun request(currentSession: SklandSession): Result<JsonObject> = when (game.appCode) {
             "arknights" -> api.checkInArknights(
-                role.uid,
-                requireNotNull(role.extra["channelMasterId"]),
-                currentSession,
+                uid = role.uid,
+                channelMasterId = requireNotNull(role.extra["channelMasterId"]),
+                session = currentSession,
             )
             "endfield" -> api.checkInEndfield(
-                requireNotNull(role.extra["roleId"]),
-                requireNotNull(role.extra["serverId"]),
-                currentSession,
+                uid = role.uid,
+                roleId = requireNotNull(role.extra["roleId"]),
+                serverId = requireNotNull(role.extra["serverId"]),
+                session = currentSession,
             )
             else -> Result.failure(IllegalArgumentException("不支持的游戏"))
         }
