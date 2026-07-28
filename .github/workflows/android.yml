@@ -36,45 +36,32 @@ jobs:
         run: |
           python <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('app/src/main/java/io/github/feigepro/checkintrace/MainActivity.kt')
           text = path.read_text(encoding='utf-8')
 
-          old_panel = '''            MihoyoAccountRow(
-              loggedIn = mihoyoLoggedIn,
-              enabled = enabled,
-              onQrLogin = onMihoyoQrLogin,
-          )'''
-          new_panel = '''            AccountRow("米游社", mihoyoLoggedIn, enabled, onMihoyoQrLogin)'''
-          if old_panel in text:
-              text = text.replace(old_panel, new_panel, 1)
-          elif new_panel not in text:
+          panel_pattern = re.compile(
+              r'\s{12}MihoyoAccountRow\(\s*'
+              r'loggedIn = mihoyoLoggedIn,\s*'
+              r'enabled = enabled,\s*'
+              r'onQrLogin = onMihoyoQrLogin,\s*'
+              r'\)',
+          )
+          text, panel_count = panel_pattern.subn(
+              '            AccountRow("米游社", mihoyoLoggedIn, enabled, onMihoyoQrLogin)',
+              text,
+              count=1,
+          )
+          if panel_count == 0 and 'AccountRow("米游社", mihoyoLoggedIn, enabled, onMihoyoQrLogin)' not in text:
               raise SystemExit('米游社账号行结构不符合预期')
 
-          old_component = '''
-          @Composable
-          private fun MihoyoAccountRow(
-              loggedIn: Boolean,
-              enabled: Boolean,
-              onQrLogin: () -> Unit,
-          ) {
-              Row(
-                  Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
-                  verticalAlignment = Alignment.CenterVertically,
-                  horizontalArrangement = Arrangement.spacedBy(12.dp),
-              ) {
-                  AccountIdentity("米游社", loggedIn, Modifier.weight(1f))
-                  Button(
-                      onClick = onQrLogin,
-                      enabled = enabled,
-                      shape = RoundedCornerShape(14.dp),
-                  ) { Text(if (loggedIn) "重新扫码" else "二维码登录") }
-              }
-          }
-          '''
-          if old_component in text:
-              text = text.replace(old_component, '\n', 1)
-          elif 'private fun MihoyoAccountRow(' in text:
+          component_pattern = re.compile(
+              r'\n@Composable\nprivate fun MihoyoAccountRow\(.*?\n}\n\n(?=@Composable\nprivate fun AccountRow)',
+              flags=re.DOTALL,
+          )
+          text, component_count = component_pattern.subn('\n', text, count=1)
+          if component_count == 0 and 'private fun MihoyoAccountRow(' in text:
               raise SystemExit('米游社独立按钮组件不符合预期')
 
           old_label = ') { Text(if (loggedIn) "重新登录" else "登录") }'
