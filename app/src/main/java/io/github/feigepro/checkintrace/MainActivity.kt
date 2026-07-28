@@ -2,7 +2,6 @@ package io.github.feigepro.checkintrace
 
 import android.Manifest
 import android.app.TimePickerDialog
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Build
@@ -104,9 +103,6 @@ private fun MainScreen(model: MainViewModel) {
                     sklandLoggedIn = state.sklandLoggedIn,
                     enabled = loginEnabled,
                     onMihoyoQrLogin = model::beginMihoyoLogin,
-                    onMihoyoSmsLogin = {
-                        context.startActivity(Intent(context, MihoyoCaptchaLoginActivity::class.java))
-                    },
                     onSklandLogin = model::beginSklandLogin,
                 )
             }
@@ -232,7 +228,6 @@ private fun AccountPanel(
     sklandLoggedIn: Boolean,
     enabled: Boolean,
     onMihoyoQrLogin: () -> Unit,
-    onMihoyoSmsLogin: () -> Unit,
     onSklandLogin: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
@@ -241,7 +236,6 @@ private fun AccountPanel(
                 loggedIn = mihoyoLoggedIn,
                 enabled = enabled,
                 onQrLogin = onMihoyoQrLogin,
-                onSmsLogin = onMihoyoSmsLogin,
             )
             HorizontalDivider(Modifier.padding(horizontal = 16.dp))
             AccountRow("森空岛", sklandLoggedIn, enabled, onSklandLogin)
@@ -254,33 +248,18 @@ private fun MihoyoAccountRow(
     loggedIn: Boolean,
     enabled: Boolean,
     onQrLogin: () -> Unit,
-    onSmsLogin: () -> Unit,
 ) {
-    Column(
+    Row(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        AccountIdentity("米游社", loggedIn)
-        Text(
-            "二维码为主要登录方式；短信验证码作为备用。两种方式共用本机 Android 设备身份。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-        ) {
-            OutlinedButton(
-                onClick = onSmsLogin,
-                enabled = enabled,
-                shape = RoundedCornerShape(14.dp),
-            ) { Text("短信验证码") }
-            Button(
-                onClick = onQrLogin,
-                enabled = enabled,
-                shape = RoundedCornerShape(14.dp),
-            ) { Text(if (loggedIn) "重新扫码" else "二维码登录") }
-        }
+        AccountIdentity("米游社", loggedIn, Modifier.weight(1f))
+        Button(
+            onClick = onQrLogin,
+            enabled = enabled,
+            shape = RoundedCornerShape(14.dp),
+        ) { Text(if (loggedIn) "重新扫码" else "二维码登录") }
     }
 }
 

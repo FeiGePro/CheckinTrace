@@ -46,6 +46,7 @@ data class MainUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = CredentialRepository(EncryptedCredentialStore(application))
     private val autoCheckInStatusStore = AutoCheckInStatusStore(application)
+    private val dailyCheckInProgressStore = DailyCheckInProgressStore(application)
     private val qrClient = MihoyoQrLoginClient(
         deviceIdentity = repository.loadMihoyoDeviceIdentity()
             ?: MihoyoQrLoginClient.generateDeviceIdentity().also(repository::saveMihoyoDeviceIdentity),
@@ -121,7 +122,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.value = _state.value.copy(
                 busy = false,
                 qrSession = session,
-                qrStatus = "请使用米游社 App 扫码并确认。该方式会显示为电脑/通行证登录；短信验证码仍作为备用方式。",
+                qrStatus = "请使用米游社 App 扫码并确认电脑/通行证登录。",
             )
             pollMihoyoQr(session)
         }
@@ -282,6 +283,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     val roles = roleResult.getOrThrow()
                     if (roles.isEmpty()) lines += "${nowLabel()} ${game.displayName}：没有找到绑定角色"
+                    var allRolesCompleted = roles.isNotEmpty()
                     for (role in roles) {
                         val label = "${game.displayName} · ${role.nickname}"
                         requestPacer.awaitTurn()
@@ -290,8 +292,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         when (val result = provider.checkIn(game, role)) {
                             is CheckInResult.Success -> lines += "${nowLabel()} $label：${result.message}"
                             CheckInResult.AlreadyCheckedIn -> lines += "${nowLabel()} $label：今日已签到"
-                            is CheckInResult.Unknown -> lines += "${nowLabel()} $label：结果未知（${result.message}）"
+                            is CheckInResult.Unknown -> {
+                                allRolesCompleted = false
+                                lines += "${nowLabel()} $label：结果未知（${result.message}）"
+                            }
                             is CheckInResult.Failure -> {
+                                allRolesCompleted = false
                                 lines += "${nowLabel()} $label：失败（${result.message}）"
                                 if (result.code == "CAPTCHA_REQUIRED") {
                                     lines += "${nowLabel()} 检测到人工验证要求，已停止${providerName(providerType)}后续请求"
@@ -301,6 +307,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                         _state.value = _state.value.copy(output = lines.toList())
+                    }
+                    if (allRolesCompleted && !stopProvider) {
+                        dailyCheckInProgressStore.markGameCompleted(game.id)
+                        lines += "${nowLabel()} ${game.displayName}：已记录今日完成，计划任务不会重复执行"
                     }
                 }
             }

@@ -31,6 +31,7 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
     override suspend fun doWork(): Result {
         val taskId = DevLogger.newTaskId()
         val statusStore = AutoCheckInStatusStore(applicationContext)
+        val dailyCheckInProgressStore = DailyCheckInProgressStore(applicationContext)
         val previousSnapshot = statusStore.load()
         val startedAt = System.currentTimeMillis()
         val attempt = runAttemptCount + 1
@@ -72,7 +73,12 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
             val selected = applicationContext.getSharedPreferences("ui_settings", 0)
                 .getStringSet("selected_games", null)?.toSet()
                 ?: GameCatalog.builtIn.filter { it.enabledByDefault }.mapTo(mutableSetOf()) { it.id }
-            val games = GameCatalog.builtIn.filter { it.id in selected }
+            val selectedGames = GameCatalog.builtIn.filter { it.id in selected }
+            val completedGameIds = dailyCheckInProgressStore.loadToday().completedGameIds
+            val games = selectedGames.filterNot { it.id in completedGameIds }
+            selectedGames.filter { it.id in completedGameIds }.forEach { game ->
+                lines += timestamped("${game.displayName}：今天已手动完成，计划任务跳过")
+            }
             val providers = mapOf(
                 ProviderType.MIHOYO to repository.loadMihoyo(DEFAULT_ACCOUNT)?.let(::MihoyoProvider),
                 ProviderType.SKLAND to repository.loadSkland(DEFAULT_ACCOUNT)?.let { credential ->
@@ -84,8 +90,15 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
             var hasRetryableFailure = false
             val requestPacer = CheckInRequestPacer()
 
-            DevLogger.info("自动任务", "每日签到开始，已选 ${games.size} 个游戏，第 $attempt 次尝试", taskId)
-            if (games.isEmpty()) lines += timestamped("没有选择需要自动签到的游戏")
+            DevLogger.info(
+                "自动任务",
+                "每日签到开始，已选 ${selectedGames.size} 个游戏，待执行 ${games.size} 个，第 $attempt 次尝试",
+                taskId,
+            )
+            if (selectedGames.isEmpty()) lines += timestamped("没有选择需要自动签到的游戏")
+            if (selectedGames.isNotEmpty() && games.isEmpty()) {
+                lines += timestamped("今天所选游戏均已完成，不访问平台，也不安排重试")
+            }
 
             for ((type, providerGames) in games.groupBy { it.provider }) {
                 val provider = providers[type]

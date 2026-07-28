@@ -13,10 +13,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.CheckinTrace"
         android:usesCleartextTraffic="false">
-        <activity
-            android:name=".MihoyoCaptchaLoginActivity"
-            android:exported="false" />
-        <activity
+<activity
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>
