@@ -1,0 +1,609 @@
+name: Apply manual completion fix
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'feat/reliability-login-observability'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Apply focused changes
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}: {old[:80]!r}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # Remove the unsupported SMS/AIGIS login implementation completely.
+          for path in [
+              'app/src/main/java/io/github/feigepro/checkintrace/MihoyoCaptchaLoginActivity.kt',
+              'app/src/main/java/io/github/feigepro/checkintrace/provider/mihoyo/MihoyoCaptchaLoginClient.kt',
+              'app/src/test/java/io/github/feigepro/checkintrace/MihoyoAigisHtmlTest.kt',
+              'app/src/test/java/io/github/feigepro/checkintrace/provider/mihoyo/MihoyoCaptchaLoginClientTest.kt',
+          ]:
+              Path(path).unlink(missing_ok=True)
+
+          replace_once(
+              'app/src/main/AndroidManifest.xml',
+              '''        <activity
+              android:name=".MihoyoCaptchaLoginActivity"
+              android:exported="false" />
+''',
+              '',
+          )
+
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/MainActivity.kt',
+              'import android.content.Intent\n',
+              '',
+          )
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/MainActivity.kt',
+              '''                AccountPanel(
+                  mihoyoLoggedIn = state.mihoyoLoggedIn,
+                  sklandLoggedIn = state.sklandLoggedIn,
+                  enabled = loginEnabled,
+                  onMihoyoQrLogin = model::beginMihoyoLogin,
+                  onMihoyoSmsLogin = {
+                      context.startActivity(Intent(context, MihoyoCaptchaLoginActivity::class.java))
+                  },
+                  onSklandLogin = model::beginSklandLogin,
+              )''',
+              '''                AccountPanel(
+                  mihoyoLoggedIn = state.mihoyoLoggedIn,
+                  sklandLoggedIn = state.sklandLoggedIn,
+                  enabled = loginEnabled,
+                  onMihoyoQrLogin = model::beginMihoyoLogin,
+                  onSklandLogin = model::beginSklandLogin,
+              )''',
+          )
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/MainActivity.kt',
+              '''private fun AccountPanel(
+              mihoyoLoggedIn: Boolean,
+              sklandLoggedIn: Boolean,
+              enabled: Boolean,
+              onMihoyoQrLogin: () -> Unit,
+              onMihoyoSmsLogin: () -> Unit,
+              onSklandLogin: () -> Unit,
+          ) {
+              Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
+                  Column {
+                      MihoyoAccountRow(
+                          loggedIn = mihoyoLoggedIn,
+                          enabled = enabled,
+                          onQrLogin = onMihoyoQrLogin,
+                          onSmsLogin = onMihoyoSmsLogin,
+                      )
+                      HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                      AccountRow("森空岛", sklandLoggedIn, enabled, onSklandLogin)
+                  }
+              }
+          }
+
+          @Composable
+          private fun MihoyoAccountRow(
+              loggedIn: Boolean,
+              enabled: Boolean,
+              onQrLogin: () -> Unit,
+              onSmsLogin: () -> Unit,
+          ) {
+              Column(
+                  Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
+                  verticalArrangement = Arrangement.spacedBy(10.dp),
+              ) {
+                  AccountIdentity("米游社", loggedIn)
+                  Text(
+                      "二维码为主要登录方式；短信验证码作为备用。两种方式共用本机 Android 设备身份。",
+                      style = MaterialTheme.typography.bodySmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  )
+                  Row(
+                      Modifier.fillMaxWidth(),
+                      horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                  ) {
+                      OutlinedButton(
+                          onClick = onSmsLogin,
+                          enabled = enabled,
+                          shape = RoundedCornerShape(14.dp),
+                      ) { Text("短信验证码") }
+                      Button(
+                          onClick = onQrLogin,
+                          enabled = enabled,
+                          shape = RoundedCornerShape(14.dp),
+                      ) { Text(if (loggedIn) "重新扫码" else "二维码登录") }
+                  }
+              }
+          }''',
+              '''private fun AccountPanel(
+              mihoyoLoggedIn: Boolean,
+              sklandLoggedIn: Boolean,
+              enabled: Boolean,
+              onMihoyoQrLogin: () -> Unit,
+              onSklandLogin: () -> Unit,
+          ) {
+              Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
+                  Column {
+                      MihoyoAccountRow(
+                          loggedIn = mihoyoLoggedIn,
+                          enabled = enabled,
+                          onQrLogin = onMihoyoQrLogin,
+                      )
+                      HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                      AccountRow("森空岛", sklandLoggedIn, enabled, onSklandLogin)
+                  }
+              }
+          }
+
+          @Composable
+          private fun MihoyoAccountRow(
+              loggedIn: Boolean,
+              enabled: Boolean,
+              onQrLogin: () -> Unit,
+          ) {
+              Row(
+                  Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.spacedBy(12.dp),
+              ) {
+                  AccountIdentity("米游社", loggedIn, Modifier.weight(1f))
+                  Button(
+                      onClick = onQrLogin,
+                      enabled = enabled,
+                      shape = RoundedCornerShape(14.dp),
+                  ) { Text(if (loggedIn) "重新扫码" else "二维码登录") }
+              }
+          }''',
+          )
+
+          # Daily completion state shared by manual and scheduled runs.
+          Path('app/src/main/java/io/github/feigepro/checkintrace/DailyCheckInProgressStore.kt').write_text(r'''package io.github.feigepro.checkintrace
+
+import android.content.Context
+import java.time.LocalDate
+
+internal data class DailyCheckInProgress(
+    val date: String,
+    val completedGameIds: Set<String> = emptySet(),
+    val completedRoleKeys: Set<String> = emptySet(),
+    val submittedRoleKeys: Set<String> = emptySet(),
+) {
+    fun normalizedFor(today: String): DailyCheckInProgress =
+        if (date == today) this else DailyCheckInProgress(date = today)
+}
+
+/**
+ * Stores only today's idempotency state. A new local calendar date automatically starts with an empty record.
+ * Manual and WorkManager runs share this store so a successful manual run prevents the scheduled run from
+ * repeating the same game or converting a later transient read error into a retry.
+ */
+internal class DailyCheckInProgressStore(context: Context) {
+    private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+
+    @Synchronized
+    fun loadToday(today: LocalDate = LocalDate.now()): DailyCheckInProgress {
+        val date = today.toString()
+        return DailyCheckInProgress(
+            date = preferences.getString(KEY_DATE, null).orEmpty(),
+            completedGameIds = preferences.getStringSet(KEY_COMPLETED_GAMES, emptySet()).orEmpty().toSet(),
+            completedRoleKeys = preferences.getStringSet(KEY_COMPLETED_ROLES, emptySet()).orEmpty().toSet(),
+            submittedRoleKeys = preferences.getStringSet(KEY_SUBMITTED_ROLES, emptySet()).orEmpty().toSet(),
+        ).normalizedFor(date)
+    }
+
+    @Synchronized
+    fun markGameCompleted(gameId: String) = mutate { progress ->
+        progress.copy(completedGameIds = progress.completedGameIds + gameId)
+    }
+
+    @Synchronized
+    fun markRoleSubmitted(roleKey: String) = mutate { progress ->
+        progress.copy(submittedRoleKeys = progress.submittedRoleKeys + roleKey)
+    }
+
+    @Synchronized
+    fun markRoleCompleted(roleKey: String) = mutate { progress ->
+        progress.copy(
+            completedRoleKeys = progress.completedRoleKeys + roleKey,
+            submittedRoleKeys = progress.submittedRoleKeys + roleKey,
+        )
+    }
+
+    @Synchronized
+    fun removeRoleSubmitted(roleKey: String) = mutate { progress ->
+        progress.copy(submittedRoleKeys = progress.submittedRoleKeys - roleKey)
+    }
+
+    private fun mutate(block: (DailyCheckInProgress) -> DailyCheckInProgress) {
+        save(block(loadToday()))
+    }
+
+    private fun save(progress: DailyCheckInProgress) {
+        check(
+            preferences.edit()
+                .putString(KEY_DATE, progress.date)
+                .putStringSet(KEY_COMPLETED_GAMES, progress.completedGameIds.toSet())
+                .putStringSet(KEY_COMPLETED_ROLES, progress.completedRoleKeys.toSet())
+                .putStringSet(KEY_SUBMITTED_ROLES, progress.submittedRoleKeys.toSet())
+                .commit(),
+        ) { "无法保存今日签到进度" }
+    }
+
+    private companion object {
+        const val PREFERENCES_NAME = "daily_checkin_progress"
+        const val KEY_DATE = "date"
+        const val KEY_COMPLETED_GAMES = "completed_games"
+        const val KEY_COMPLETED_ROLES = "completed_roles"
+        const val KEY_SUBMITTED_ROLES = "submitted_roles"
+    }
+}
+''', encoding='utf-8')
+
+          Path('app/src/test/java/io/github/feigepro/checkintrace/DailyCheckInProgressTest.kt').write_text(r'''package io.github.feigepro.checkintrace
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class DailyCheckInProgressTest {
+    @Test
+    fun `same date keeps manual completion`() {
+        val progress = DailyCheckInProgress(
+            date = "2026-07-28",
+            completedGameIds = setOf("genshin"),
+            completedRoleKeys = setOf("role"),
+            submittedRoleKeys = setOf("role"),
+        )
+
+        assertEquals(progress, progress.normalizedFor("2026-07-28"))
+    }
+
+    @Test
+    fun `new date clears yesterday completion`() {
+        val progress = DailyCheckInProgress(
+            date = "2026-07-27",
+            completedGameIds = setOf("genshin"),
+            completedRoleKeys = setOf("role"),
+            submittedRoleKeys = setOf("role"),
+        ).normalizedFor("2026-07-28")
+
+        assertEquals("2026-07-28", progress.date)
+        assertTrue(progress.completedGameIds.isEmpty())
+        assertTrue(progress.completedRoleKeys.isEmpty())
+        assertTrue(progress.submittedRoleKeys.isEmpty())
+    }
+}
+''', encoding='utf-8')
+
+          # Manual check-in records definitive daily completion and POST idempotency.
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/MainViewModel.kt',
+              '    private val autoCheckInStatusStore = AutoCheckInStatusStore(application)\n',
+              '    private val autoCheckInStatusStore = AutoCheckInStatusStore(application)\n    private val dailyCheckInProgressStore = DailyCheckInProgressStore(application)\n',
+          )
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/MainViewModel.kt',
+              'qrStatus = "请使用米游社 App 扫码并确认。该方式会显示为电脑/通行证登录；短信验证码仍作为备用方式。",',
+              'qrStatus = "请使用米游社 App 扫码并确认电脑/通行证登录。",',
+          )
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/MainViewModel.kt',
+              '''                    val roles = roleResult.getOrThrow()
+                  if (roles.isEmpty()) lines += "${nowLabel()} ${game.displayName}：没有找到绑定角色"
+                  for (role in roles) {
+                      val label = "${game.displayName} · ${role.nickname}"
+                      requestPacer.awaitTurn()
+                      lines += "${nowLabel()} $label：开始请求"
+                      _state.value = _state.value.copy(output = lines.toList())
+                      when (val result = provider.checkIn(game, role)) {
+                          is CheckInResult.Success -> lines += "${nowLabel()} $label：${result.message}"
+                          CheckInResult.AlreadyCheckedIn -> lines += "${nowLabel()} $label：今日已签到"
+                          is CheckInResult.Unknown -> lines += "${nowLabel()} $label：结果未知（${result.message}）"
+                          is CheckInResult.Failure -> {
+                              lines += "${nowLabel()} $label：失败（${result.message}）"
+                              if (result.code == "CAPTCHA_REQUIRED") {
+                                  lines += "${nowLabel()} 检测到人工验证要求，已停止${providerName(providerType)}后续请求"
+                                  stopProvider = true
+                                  break
+                              }
+                          }
+                      }
+                      _state.value = _state.value.copy(output = lines.toList())
+                  }''',
+              '''                    val roles = roleResult.getOrThrow()
+                  if (roles.isEmpty()) lines += "${nowLabel()} ${game.displayName}：没有找到绑定角色"
+                  var allRolesCompleted = roles.isNotEmpty()
+                  for (role in roles) {
+                      val label = "${game.displayName} · ${role.nickname}"
+                      val roleKey = autoCheckInRoleKey(game.id, role.uid, role.extra)
+                      requestPacer.awaitTurn()
+                      dailyCheckInProgressStore.markRoleSubmitted(roleKey)
+                      lines += "${nowLabel()} $label：开始请求"
+                      _state.value = _state.value.copy(output = lines.toList())
+                      when (val result = provider.checkIn(game, role)) {
+                          is CheckInResult.Success -> {
+                              dailyCheckInProgressStore.markRoleCompleted(roleKey)
+                              lines += "${nowLabel()} $label：${result.message}"
+                          }
+                          CheckInResult.AlreadyCheckedIn -> {
+                              dailyCheckInProgressStore.markRoleCompleted(roleKey)
+                              lines += "${nowLabel()} $label：今日已签到"
+                          }
+                          is CheckInResult.Unknown -> {
+                              allRolesCompleted = false
+                              lines += "${nowLabel()} $label：结果未知（${result.message}）"
+                          }
+                          is CheckInResult.Failure -> {
+                              allRolesCompleted = false
+                              if (result.retryable) dailyCheckInProgressStore.removeRoleSubmitted(roleKey)
+                              lines += "${nowLabel()} $label：失败（${result.message}）"
+                              if (result.code == "CAPTCHA_REQUIRED") {
+                                  lines += "${nowLabel()} 检测到人工验证要求，已停止${providerName(providerType)}后续请求"
+                                  stopProvider = true
+                                  break
+                              }
+                          }
+                      }
+                      _state.value = _state.value.copy(output = lines.toList())
+                  }
+                  if (allRolesCompleted && !stopProvider) {
+                      dailyCheckInProgressStore.markGameCompleted(game.id)
+                      lines += "${nowLabel()} ${game.displayName}：已记录今日完成，计划任务不会重复执行"
+                  }''',
+          )
+
+          # Scheduled work imports today's manual completion before any provider/network validation.
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/AutoCheckInWorker.kt',
+              '''        val statusStore = AutoCheckInStatusStore(applicationContext)
+          val previousSnapshot = statusStore.load()''',
+              '''        val statusStore = AutoCheckInStatusStore(applicationContext)
+          val dailyProgressStore = DailyCheckInProgressStore(applicationContext)
+          val dailyProgress = dailyProgressStore.loadToday()
+          val previousSnapshot = statusStore.load()''',
+          )
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/AutoCheckInWorker.kt',
+              '''        val completedRoleKeys = if (restoreProgress) {
+              previousSnapshot?.completedRoleKeys.orEmpty().toMutableSet()
+          } else {
+              mutableSetOf()
+          }
+          val submittedRoleKeys = if (restoreProgress) {
+              previousSnapshot?.submittedRoleKeys.orEmpty().toMutableSet()
+          } else {
+              mutableSetOf()
+          }''',
+              '''        val completedRoleKeys = if (restoreProgress) {
+              previousSnapshot?.completedRoleKeys.orEmpty().toMutableSet()
+          } else {
+              mutableSetOf()
+          }.apply { addAll(dailyProgress.completedRoleKeys) }
+          val submittedRoleKeys = if (restoreProgress) {
+              previousSnapshot?.submittedRoleKeys.orEmpty().toMutableSet()
+          } else {
+              mutableSetOf()
+          }.apply { addAll(dailyProgress.submittedRoleKeys) }
+          val completedGameIds = dailyProgress.completedGameIds.toMutableSet()''',
+          )
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/AutoCheckInWorker.kt',
+              '''            val games = GameCatalog.builtIn.filter { it.id in selected }
+              val providers = mapOf(''',
+              '''            val selectedGames = GameCatalog.builtIn.filter { it.id in selected }
+              val games = selectedGames.filterNot { it.id in completedGameIds }
+              selectedGames.filter { it.id in completedGameIds }.forEach { game ->
+                  lines += timestamped("${game.displayName}：今天已通过手动或自动签到完成，计划任务跳过")
+              }
+              val providers = mapOf(''',
+          )
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/AutoCheckInWorker.kt',
+              '''            DevLogger.info("自动任务", "每日签到开始，已选 ${games.size} 个游戏，第 $attempt 次尝试", taskId)
+              if (games.isEmpty()) lines += timestamped("没有选择需要自动签到的游戏")''',
+              '''            DevLogger.info("自动任务", "每日签到开始，已选 ${selectedGames.size} 个游戏，待执行 ${games.size} 个，第 $attempt 次尝试", taskId)
+              if (selectedGames.isEmpty()) lines += timestamped("没有选择需要自动签到的游戏")
+              if (selectedGames.isNotEmpty() && games.isEmpty()) {
+                  lines += timestamped("今天所选游戏均已完成，不访问平台，也不安排重试")
+              }''',
+          )
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/AutoCheckInWorker.kt',
+              '''                    for (role in roles) {
+                      val label = "${game.displayName} · ${role.nickname}"
+                      val roleKey = autoCheckInRoleKey(game.id, role.uid, role.extra)
+                      if (restoreProgress && roleKey in submittedRoleKeys) {
+                          val reason = if (roleKey in completedRoleKeys) {
+                              "已在上次尝试完成"
+                          } else {
+                              "上次已开始提交但结果未知"
+                          }
+                          lines += timestamped("$label：$reason，本次跳过")
+                          continue
+                      }
+
+                      requestPacer.awaitTurn()
+                      submittedRoleKeys += roleKey
+                      lines += timestamped("$label：开始请求")''',
+              '''                    var allRolesCompleted = roles.isNotEmpty()
+                  for (role in roles) {
+                      val label = "${game.displayName} · ${role.nickname}"
+                      val roleKey = autoCheckInRoleKey(game.id, role.uid, role.extra)
+                      if (roleKey in submittedRoleKeys) {
+                          val reason = if (roleKey in completedRoleKeys) {
+                              "今天已完成"
+                          } else {
+                              "今天已有签到请求，避免重复提交"
+                          }
+                          if (roleKey !in completedRoleKeys) allRolesCompleted = false
+                          lines += timestamped("$label：$reason，本次跳过")
+                          continue
+                      }
+
+                      requestPacer.awaitTurn()
+                      submittedRoleKeys += roleKey
+                      dailyProgressStore.markRoleSubmitted(roleKey)
+                      lines += timestamped("$label：开始请求")''',
+          )
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/AutoCheckInWorker.kt',
+              '''                        is CheckInResult.Success -> {
+                              completedRoleKeys += roleKey
+                              lines += timestamped("$label：${safeMessage(result.message)}")
+                              DevLogger.info("自动任务/${game.displayName}", result.message, taskId)
+                          }
+
+                          CheckInResult.AlreadyCheckedIn -> {
+                              completedRoleKeys += roleKey
+                              lines += timestamped("$label：今日已签到")
+                              DevLogger.info("自动任务/${game.displayName}", "今日已签到", taskId)
+                          }
+
+                          is CheckInResult.Unknown -> {
+                              completedRoleKeys += roleKey
+                              lines += timestamped("$label：结果未知（${safeMessage(result.message)}）")
+                              DevLogger.warn("自动任务/${game.displayName}", result.message, taskId)
+                              hasFailures = true
+                          }
+
+                          is CheckInResult.Failure -> {
+                              val message = safeMessage(result.message)
+                              lines += timestamped("$label：失败（$message）")
+                              DevLogger.warn("自动任务/${game.displayName}", message, taskId)
+                              hasFailures = true
+                              if (result.retryable) {
+                                  // 只有能确定 POST 尚未到达服务端的错误才允许移除提交标记并重试。
+                                  submittedRoleKeys -= roleKey
+                                  hasRetryableFailure = true
+                              }''',
+              '''                        is CheckInResult.Success -> {
+                              completedRoleKeys += roleKey
+                              dailyProgressStore.markRoleCompleted(roleKey)
+                              lines += timestamped("$label：${safeMessage(result.message)}")
+                              DevLogger.info("自动任务/${game.displayName}", result.message, taskId)
+                          }
+
+                          CheckInResult.AlreadyCheckedIn -> {
+                              completedRoleKeys += roleKey
+                              dailyProgressStore.markRoleCompleted(roleKey)
+                              lines += timestamped("$label：今日已签到")
+                              DevLogger.info("自动任务/${game.displayName}", "今日已签到", taskId)
+                          }
+
+                          is CheckInResult.Unknown -> {
+                              allRolesCompleted = false
+                              lines += timestamped("$label：结果未知（${safeMessage(result.message)}）")
+                              DevLogger.warn("自动任务/${game.displayName}", result.message, taskId)
+                              hasFailures = true
+                          }
+
+                          is CheckInResult.Failure -> {
+                              allRolesCompleted = false
+                              val message = safeMessage(result.message)
+                              lines += timestamped("$label：失败（$message）")
+                              DevLogger.warn("自动任务/${game.displayName}", message, taskId)
+                              hasFailures = true
+                              if (result.retryable) {
+                                  // 只有能确定 POST 尚未到达服务端的错误才允许移除提交标记并重试。
+                                  submittedRoleKeys -= roleKey
+                                  dailyProgressStore.removeRoleSubmitted(roleKey)
+                                  hasRetryableFailure = true
+                              }''',
+          )
+          replace_once(
+              'app/src/main/java/io/github/feigepro/checkintrace/AutoCheckInWorker.kt',
+              '''                    }
+              }
+          }
+
+          val decision = decideAutoCheckInCompletion(''',
+              '''                    }
+                  if (allRolesCompleted && !stopProvider) {
+                      completedGameIds += game.id
+                      dailyProgressStore.markGameCompleted(game.id)
+                      lines += timestamped("${game.displayName}：今天全部角色已完成")
+                  }
+              }
+          }
+
+          val decision = decideAutoCheckInCompletion(''',
+          )
+
+          # Documentation now describes QR-only miHoYo login and manual completion semantics.
+          replace_once(
+              'README.md',
+              '''- 米游社以二维码为主要登录方式，短信验证码为备用方式
+          - 米游社二维码采用已验证可用的电脑/通行证授权；取得凭证后，签到仍独立使用 Android 设备登记与 Android 请求头''',
+              '''- 米游社使用已验证可用的电脑/通行证二维码登录；取得凭证后，签到独立使用 Android 设备登记与 Android 请求头''',
+          )
+          replace_once(
+              'README.md',
+              '- 临时网络或接口错误会间隔约一小时自动重试一次\n',
+              '- 临时网络或接口错误会间隔约一小时自动重试一次\n- 当天手动签到成功后，计划任务会直接跳过对应游戏，不再重复请求或安排重试\n',
+          )
+          replace_once(
+              'README.md',
+              '   - 米游社：优先点击“二维码登录”，使用米游社扫码并确认电脑/通行证授权；同一台手机可以先截图，再从米游社扫码页的相册中识别。短信验证码仍作为备用登录方式。',
+              '   - 米游社：点击“二维码登录”，使用米游社扫码并确认电脑/通行证授权；同一台手机可以先截图，再从米游社扫码页的相册中识别。',
+          )
+          replace_once(
+              'README.md',
+              '- 临时网络或接口错误最多自动重试一次；任务会持久化已完成、结果未知以及已开始提交的角色，避免重试时重复提交。',
+              '- 当天手动签到确认成功后会记录游戏已完成；计划任务到点后直接跳过，不访问平台、不判定失败，也不安排重试。\n- 临时网络或接口错误最多自动重试一次；任务会持久化已完成、结果未知以及已开始提交的角色，避免重试时重复提交。',
+          )
+          replace_once(
+              'README.md',
+              '''- **米游社备用短信登录**：[MiyoQian](https://github.com/Marchen-orz/MiyoQian) 的 Android 短信验证码、RSA、AIGIS 和 token 交换流程。
+          ''',
+              '',
+          )
+
+          # Make sure no product code or docs still advertise the removed login path.
+          for root in ['app/src/main', 'app/src/test', 'README.md']:
+              p = Path(root)
+              files = [p] if p.is_file() else list(p.rglob('*'))
+              for file in files:
+                  if file.is_file() and file.suffix in {'.kt', '.xml', '.md'}:
+                      text = file.read_text(encoding='utf-8')
+                      if 'MihoyoCaptcha' in text or '短信验证码' in text or 'AIGIS' in text:
+                          raise SystemExit(f'removed login reference remains in {file}')
+
+          # Self-delete so the successful code commit does not leave a maintenance workflow behind.
+          Path('.github/workflows/apply-manual-completion-fix.yml').unlink()
+          PY
+
+      - name: Test and build
+        run: ./gradlew testDebugUnitTest assembleDebug assembleRelease --console=plain
+
+      - name: Commit verified changes
+        shell: bash
+        run: |
+          git config user.name 'FeiGePro'
+          git config user.email '94056084+FeiGePro@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: share manual completion with scheduled check-in'
+          git push origin HEAD:${{ github.head_ref }}
