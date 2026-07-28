@@ -232,34 +232,10 @@ private fun AccountPanel(
 ) {
     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp)) {
         Column {
-            MihoyoAccountRow(
-                loggedIn = mihoyoLoggedIn,
-                enabled = enabled,
-                onQrLogin = onMihoyoQrLogin,
-            )
+            AccountRow("米游社", mihoyoLoggedIn, enabled, onMihoyoQrLogin)
             HorizontalDivider(Modifier.padding(horizontal = 16.dp))
             AccountRow("森空岛", sklandLoggedIn, enabled, onSklandLogin)
         }
-    }
-}
-
-@Composable
-private fun MihoyoAccountRow(
-    loggedIn: Boolean,
-    enabled: Boolean,
-    onQrLogin: () -> Unit,
-) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        AccountIdentity("米游社", loggedIn, Modifier.weight(1f))
-        Button(
-            onClick = onQrLogin,
-            enabled = enabled,
-            shape = RoundedCornerShape(14.dp),
-        ) { Text(if (loggedIn) "重新扫码" else "二维码登录") }
     }
 }
 
@@ -276,7 +252,7 @@ private fun AccountRow(title: String, loggedIn: Boolean, enabled: Boolean, onLog
             enabled = enabled,
             shape = RoundedCornerShape(14.dp),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-        ) { Text(if (loggedIn) "重新登录" else "登录") }
+        ) { Text(if (loggedIn) "重新扫码登录" else "扫码登录") }
     }
 }
 
