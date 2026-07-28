@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -17,6 +17,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -26,6 +29,63 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+
+      - name: Apply unified scan login buttons
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/reliability-login-observability'
+        shell: bash
+        run: |
+          python <<'PY'
+          from pathlib import Path
+
+          path = Path('app/src/main/java/io/github/feigepro/checkintrace/MainActivity.kt')
+          text = path.read_text(encoding='utf-8')
+
+          old_panel = '''            MihoyoAccountRow(
+              loggedIn = mihoyoLoggedIn,
+              enabled = enabled,
+              onQrLogin = onMihoyoQrLogin,
+          )'''
+          new_panel = '''            AccountRow("米游社", mihoyoLoggedIn, enabled, onMihoyoQrLogin)'''
+          if old_panel in text:
+              text = text.replace(old_panel, new_panel, 1)
+          elif new_panel not in text:
+              raise SystemExit('米游社账号行结构不符合预期')
+
+          old_component = '''
+          @Composable
+          private fun MihoyoAccountRow(
+              loggedIn: Boolean,
+              enabled: Boolean,
+              onQrLogin: () -> Unit,
+          ) {
+              Row(
+                  Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.spacedBy(12.dp),
+              ) {
+                  AccountIdentity("米游社", loggedIn, Modifier.weight(1f))
+                  Button(
+                      onClick = onQrLogin,
+                      enabled = enabled,
+                      shape = RoundedCornerShape(14.dp),
+                  ) { Text(if (loggedIn) "重新扫码" else "二维码登录") }
+              }
+          }
+          '''
+          if old_component in text:
+              text = text.replace(old_component, '\n', 1)
+          elif 'private fun MihoyoAccountRow(' in text:
+              raise SystemExit('米游社独立按钮组件不符合预期')
+
+          old_label = ') { Text(if (loggedIn) "重新登录" else "登录") }'
+          new_label = ') { Text(if (loggedIn) "重新扫码登录" else "扫码登录") }'
+          if old_label in text:
+              text = text.replace(old_label, new_label, 1)
+          elif new_label not in text:
+              raise SystemExit('扫码登录按钮文案不符合预期')
+
+          path.write_text(text, encoding='utf-8')
+          PY
 
       - name: Grant Gradle wrapper execute permission
         run: chmod +x ./gradlew
@@ -37,6 +97,20 @@ jobs:
           ./gradlew testDebugUnitTest assembleDebug assembleRelease --console=plain 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
           exit "$status"
+
+      - name: Commit verified UI changes
+        if: github.event_name == 'pull_request' && github.head_ref == 'feat/reliability-login-observability'
+        shell: bash
+        run: |
+          git add app/src/main/java/io/github/feigepro/checkintrace/MainActivity.kt
+          if git diff --cached --quiet; then
+            echo "UI changes already committed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: unify scan login buttons"
+          git push origin HEAD:${{ github.head_ref }}
 
       - name: Upload build log
         if: always()
