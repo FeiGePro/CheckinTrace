@@ -27,6 +27,20 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Prepare stable Debug signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+          signing_dir="$RUNNER_TEMP/checkintrace-signing"
+          mkdir -p "$signing_dir"
+          keystore_path="$signing_dir/checkintrace-debug.keystore"
+          base64 --decode ci/checkintrace-debug.keystore.b64 > "$keystore_path"
+          chmod 600 "$keystore_path"
+          echo "CHECKINTRACE_DEBUG_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+          echo "CHECKINTRACE_DEBUG_KEYSTORE_PASSWORD=android" >> "$GITHUB_ENV"
+          echo "CHECKINTRACE_DEBUG_KEY_ALIAS=androiddebugkey" >> "$GITHUB_ENV"
+          echo "CHECKINTRACE_DEBUG_KEY_PASSWORD=android" >> "$GITHUB_ENV"
+
       - name: Grant Gradle wrapper execute permission
         run: chmod +x ./gradlew
 
@@ -38,12 +52,22 @@ jobs:
           status=${PIPESTATUS[0]}
           exit "$status"
 
+      - name: Verify stable Debug certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          apksigner_path="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          "$apksigner_path" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | tee debug-certificate.log
+          grep -F "Signer #1 certificate SHA-256 digest: 49af905ddfdacc4f816a939c716fc707a4f22811a9954a659a60055dfc90cd47" debug-certificate.log
+
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: CheckinTrace-build-log
-          path: build.log
+          path: |
+            build.log
+            debug-certificate.log
           if-no-files-found: warn
           retention-days: 7
 
