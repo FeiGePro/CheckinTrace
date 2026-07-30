@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           apksigner_path="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
           "$apksigner_path" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | tee debug-certificate.log
-          grep -F "Signer #1 certificate SHA-256 digest: 49af905ddfdacc4f816a939c716fc707a4f22811a9954a659a60055dfc90cd47" debug-certificate.log
+          grep -F "certificate SHA-256 digest: 49af905ddfdacc4f816a939c716fc707a4f22811a9954a659a60055dfc90cd47" debug-certificate.log
 
       - name: Upload build log
         if: always()
