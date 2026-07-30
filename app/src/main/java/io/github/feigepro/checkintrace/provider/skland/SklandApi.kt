@@ -185,9 +185,18 @@ class SklandApi(
 
     private fun executeJson(request: Request): JsonObject = client.newCall(request).execute().use { response ->
         val raw = response.body?.string().orEmpty()
+        val parsed = raw.takeIf(String::isNotBlank)?.let { body ->
+            runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
+        }
+        if (response.code == 401) {
+            val message = parsed?.let(::apiMessage)
+                ?.takeUnless { it == "未知接口错误" }
+                ?: "HTTP 401"
+            throw SklandAuthException(response.code, message)
+        }
         check(response.isSuccessful) { "HTTP ${response.code}" }
         check(raw.isNotBlank()) { "接口返回空内容" }
-        json.parseToJsonElement(raw).jsonObject
+        parsed ?: json.parseToJsonElement(raw).jsonObject
     }
 
     private fun authHeaders(): Headers = Headers.Builder()
