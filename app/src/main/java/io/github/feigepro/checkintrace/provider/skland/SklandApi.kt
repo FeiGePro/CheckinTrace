@@ -179,7 +179,11 @@ class SklandApi(
                 .headers(headerBuilder.build())
                 .post(body.toRequestBody(JSON_MEDIA_TYPE))
                 .build()
-            executeJson(request, operation).also {
+            executeJson(
+                request = request,
+                operation = operation,
+                allowDuplicateAttendanceResponse = true,
+            ).also {
                 DevLogger.info("森空岛/签到", "$operation 接口响应 code=${apiCode(it)}", taskId)
             }
         }.onFailure {
@@ -209,28 +213,34 @@ class SklandApi(
         return executeJson(request, operation)
     }
 
-    private fun executeJson(request: Request, operation: String): JsonObject =
-        client.newCall(request).execute().use { response ->
-            val raw = response.body?.string().orEmpty()
-            val parsed = raw.takeIf(String::isNotBlank)?.let { body ->
-                runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
-            }
-            val serverMessage = parsed?.let(::apiMessage)
-                ?.takeUnless { it == "未知接口错误" }
-            if (response.code == 401) {
-                throw SklandAuthException(response.code, serverMessage ?: "HTTP 401")
-            }
-            if (response.code == 403) {
-                val suffix = serverMessage?.let { "：$it" }.orEmpty()
-                throw SklandForbiddenException(
-                    operation = operation,
-                    message = "$operation 被森空岛拒绝（HTTP 403）$suffix",
-                )
-            }
-            check(response.isSuccessful) { "$operation 失败（HTTP ${response.code}）" }
-            check(raw.isNotBlank()) { "$operation 返回空内容" }
-            parsed ?: json.parseToJsonElement(raw).jsonObject
+    private fun executeJson(
+        request: Request,
+        operation: String,
+        allowDuplicateAttendanceResponse: Boolean = false,
+    ): JsonObject = client.newCall(request).execute().use { response ->
+        val raw = response.body?.string().orEmpty()
+        val parsed = raw.takeIf(String::isNotBlank)?.let { body ->
+            runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
         }
+        val serverMessage = parsed?.let(::apiMessage)
+            ?.takeUnless { it == "未知接口错误" }
+        if (response.code == 401) {
+            throw SklandAuthException(response.code, serverMessage ?: "HTTP 401")
+        }
+        if (response.code == 403) {
+            if (allowDuplicateAttendanceResponse && parsed?.let(::isAlreadyCheckedInResponse) == true) {
+                return@use parsed
+            }
+            val suffix = serverMessage?.let { "：$it" }.orEmpty()
+            throw SklandForbiddenException(
+                operation = operation,
+                message = "$operation 被森空岛拒绝（HTTP 403）$suffix",
+            )
+        }
+        check(response.isSuccessful) { "$operation 失败（HTTP ${response.code}）" }
+        check(raw.isNotBlank()) { "$operation 返回空内容" }
+        parsed ?: json.parseToJsonElement(raw).jsonObject
+    }
 
     private fun commonHeaders(): Headers = Headers.Builder()
         .add("User-Agent", SKLAND_USER_AGENT)
@@ -243,6 +253,16 @@ class SklandApi(
         val message = apiMessage(value)
         if (code == 10000 || code == 10002) throw SklandAuthException(code, message)
         error(message)
+    }
+
+    private fun isAlreadyCheckedInResponse(value: JsonObject): Boolean {
+        val code = apiCode(value)
+        val message = apiMessage(value)
+        return code == 10001 ||
+            message.contains("请勿重复签到") ||
+            message.contains("重复签到") ||
+            message.contains("今日已签到") ||
+            message.contains("Please do not sign in again", ignoreCase = true)
     }
 
     private fun apiCode(value: JsonObject): Int =
