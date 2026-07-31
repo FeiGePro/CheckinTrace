@@ -14,6 +14,7 @@ import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrLoginClient
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrSession
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrState
 import io.github.feigepro.checkintrace.provider.skland.SklandApi
+import io.github.feigepro.checkintrace.provider.skland.SklandForbiddenException
 import io.github.feigepro.checkintrace.provider.skland.SklandProvider
 import io.github.feigepro.checkintrace.provider.skland.SklandQrLoginClient
 import io.github.feigepro.checkintrace.provider.skland.SklandQrPollResult
@@ -278,7 +279,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (stopProvider) break
                     val roleResult = provider.getRoles(game)
                     if (roleResult.isFailure) {
-                        lines += "${nowLabel()} ${game.displayName}：读取角色失败（${roleResult.exceptionOrNull()?.message}）"
+                        val error = roleResult.exceptionOrNull()
+                        lines += "${nowLabel()} ${game.displayName}：读取角色失败（${error?.message}）"
+                        if (error is SklandForbiddenException) {
+                            lines += "${nowLabel()} 森空岛返回 HTTP 403，已停止后续请求，请勿连续重试"
+                            stopProvider = true
+                            break
+                        }
                         continue
                     }
                     val roles = roleResult.getOrThrow()
@@ -299,8 +306,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             is CheckInResult.Failure -> {
                                 allRolesCompleted = false
                                 lines += "${nowLabel()} $label：失败（${result.message}）"
-                                if (result.code == "CAPTCHA_REQUIRED") {
-                                    lines += "${nowLabel()} 检测到人工验证要求，已停止${providerName(providerType)}后续请求"
+                                if (result.code in STOP_PROVIDER_CODES) {
+                                    lines += "${nowLabel()} ${providerName(providerType)}需要人工处理，已停止后续请求"
                                     stopProvider = true
                                     break
                                 }
@@ -334,6 +341,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val DEFAULT_ACCOUNT = "default"
+        val STOP_PROVIDER_CODES = setOf("CAPTCHA_REQUIRED", "AUTH_REQUIRED", "RISK_BLOCKED")
         val TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
     }
 }

@@ -16,6 +16,7 @@ import io.github.feigepro.checkintrace.logging.DevLogger
 import io.github.feigepro.checkintrace.logging.LogRedactor
 import io.github.feigepro.checkintrace.provider.CheckInRequestPacer
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoProvider
+import io.github.feigepro.checkintrace.provider.skland.SklandForbiddenException
 import io.github.feigepro.checkintrace.provider.skland.SklandProvider
 import io.github.feigepro.checkintrace.security.CredentialRepository
 import io.github.feigepro.checkintrace.security.EncryptedCredentialStore
@@ -131,6 +132,11 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                         DevLogger.error("自动任务/${game.displayName}", message, taskId)
                         hasFailures = true
                         if (isTransientError(error)) hasRetryableFailure = true else requiresAction = true
+                        if (error is SklandForbiddenException) {
+                            lines += timestamped("森空岛返回 HTTP 403，已停止后续请求，不安排自动重试")
+                            stopProvider = true
+                            break
+                        }
                         continue
                     }
 
@@ -197,8 +203,8 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
                                     hasRetryableFailure = true
                                 }
                                 if (result.code in ACTION_REQUIRED_CODES) requiresAction = true
-                                if (result.code == "CAPTCHA_REQUIRED") {
-                                    lines += timestamped("检测到人工验证要求，已停止${providerName(type)}后续请求")
+                                if (result.code in STOP_PROVIDER_CODES) {
+                                    lines += timestamped("${providerName(type)}需要人工处理，已停止后续请求")
                                     stopProvider = true
                                     break
                                 }
@@ -316,7 +322,8 @@ class AutoCheckInWorker(context: Context, parameters: WorkerParameters) : Corout
     private companion object {
         const val DEFAULT_ACCOUNT = "default"
         const val MAX_INTERRUPTED_RUN_AGE_MILLIS = 6 * 60 * 60 * 1000L
-        val ACTION_REQUIRED_CODES = setOf("CAPTCHA_REQUIRED", "AUTH_REQUIRED", "FIRST_BIND_REQUIRED")
+        val ACTION_REQUIRED_CODES = setOf("CAPTCHA_REQUIRED", "AUTH_REQUIRED", "FIRST_BIND_REQUIRED", "RISK_BLOCKED")
+        val STOP_PROVIDER_CODES = setOf("CAPTCHA_REQUIRED", "AUTH_REQUIRED", "RISK_BLOCKED")
         val NOTIFIABLE_FAILURE_STATES = setOf(AutoCheckInRunState.FAILED, AutoCheckInRunState.ACTION_REQUIRED)
         val TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
 
