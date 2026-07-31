@@ -1,5 +1,6 @@
 package io.github.feigepro.checkintrace.provider.skland
 
+import io.github.feigepro.checkintrace.data.CheckInResult
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.test.runTest
 import okhttp3.MediaType.Companion.toMediaType
@@ -38,6 +39,20 @@ class SklandApiAuthTest {
         assertTrue(error is SklandForbiddenException)
         assertEquals("读取绑定角色", (error as SklandForbiddenException).operation)
         assertTrue(error.message.orEmpty().contains("HTTP 403"))
+    }
+
+    @Test
+    fun duplicateAttendanceHttp403IsHandledAsAlreadyCheckedIn() = runTest {
+        val client = responseClient(403, "Forbidden", """{"code":10001,"message":"请勿重复签到"}""")
+        val api = SklandApi(client = client)
+
+        val response = api.checkInArknights(
+            uid = "uid-1",
+            channelMasterId = "1",
+            session = SklandSession(cred = "cred", signToken = "token"),
+        ).getOrThrow()
+
+        assertEquals(CheckInResult.AlreadyCheckedIn, SklandAttendanceResponse.parse(response))
     }
 
     @Test
