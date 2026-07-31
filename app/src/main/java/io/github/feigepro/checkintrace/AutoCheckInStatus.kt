@@ -20,9 +20,12 @@ data class AutoCheckInSnapshot(
     val state: AutoCheckInRunState,
     val startedAtEpochMillis: Long,
     val finishedAtEpochMillis: Long? = null,
+    val scheduledTimeLabel: String? = null,
     val attempt: Int = 1,
     val lines: List<String> = emptyList(),
     val completedRoleKeys: Set<String> = emptySet(),
+    /** POST 可能已经到达服务端的角色；进程中断后的重试不得再次提交。 */
+    val submittedRoleKeys: Set<String> = emptySet(),
 )
 
 class AutoCheckInStatusStore(context: Context) {

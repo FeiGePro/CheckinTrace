@@ -12,6 +12,7 @@ data class SklandSignedHeaders(
     val versionName: String = "",
 )
 
+/** 签名格式与 README 所列 skyland_auto_checkin 保持一致。 */
 object SklandSigner {
     fun sign(
         path: String,
@@ -19,7 +20,7 @@ object SklandSigner {
         signToken: String,
         epochSeconds: Long,
     ): SklandSignedHeaders {
-        val timestamp = (epochSeconds - 1).toString()
+        val timestamp = (epochSeconds - 2).toString()
         val headerJson = "{\"platform\":\"\",\"timestamp\":\"$timestamp\",\"dId\":\"\",\"vName\":\"\"}"
         val input = path + bodyOrQuery + timestamp + headerJson
         val hmac = Mac.getInstance("HmacSHA256").run {

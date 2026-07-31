@@ -1,8 +1,12 @@
 package io.github.feigepro.checkintrace.provider.skland
 
 import io.github.feigepro.checkintrace.logging.DevLogger
+import java.time.Instant
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -14,36 +18,94 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.time.Instant
-import java.util.concurrent.TimeUnit
-import java.util.zip.GZIPInputStream
+
+@Serializable
+data class SklandCredentialBundle(
+    val accessToken: String,
+    val cred: String? = null,
+    val signToken: String? = null,
+    val userId: String? = null,
+    val signTokenUpdatedAtEpochSeconds: Long? = null,
+)
 
 data class SklandSession(val cred: String, val signToken: String)
 
+class SklandAuthException(val apiCode: Int, message: String) : IllegalStateException(message)
+
+class SklandForbiddenException(
+    val operation: String,
+    message: String,
+) : IllegalStateException(message)
+
+/**
+ * 森空岛协议分层：
+ * - 官方扫码 access token -> grant code -> cred/sign token；
+ * - 每日首次使用时按需刷新 sign token；
+ * - 角色与签到请求使用同一稳定 Android 请求画像和对应接口协议。
+ */
 class SklandApi(
     private val client: OkHttpClient = defaultClient(),
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
-    suspend fun exchangeToken(token: String, taskId: String? = null): Result<SklandSession> =
+    suspend fun exchangeToken(token: String, taskId: String? = null): Result<SklandCredentialBundle> =
         withContext(Dispatchers.IO) {
             runCatching {
                 DevLogger.debug("森空岛/登录", "开始交换登录凭证", taskId)
                 val grantBody = "{\"appCode\":\"$APP_CODE\",\"token\":${jsonString(token)},\"type\":0}"
-                val grant = postJson(GRANT_CODE_URL, grantBody, baseHeaders())
-                check(apiCode(grant) == 0) { apiMessage(grant) }
-                val code = grant["data"]!!.jsonObject["code"]!!.jsonPrimitive.content
+                val grant = postJson(
+                    url = GRANT_CODE_URL,
+                    body = grantBody,
+                    headers = commonHeaders(),
+                    operation = "获取 grant code",
+                )
+                requireApiSuccess(grant)
+                val code = grant["data"]?.jsonObject?.get("code")?.jsonPrimitive?.content
+                    ?: error("grant 接口未返回 code")
 
+                // 避免把两次登录交换压成同一瞬间的突发请求。
+                delay(AUTH_PHASE_DELAY_MILLIS)
                 val credBody = "{\"code\":${jsonString(code)},\"kind\":1}"
-                val credResponse = postJson(CRED_CODE_URL, credBody, baseHeaders())
-                check(apiCode(credResponse) == 0) { apiMessage(credResponse) }
-                val data = credResponse["data"]!!.jsonObject
+                val credResponse = postJson(
+                    url = CRED_CODE_URL,
+                    body = credBody,
+                    headers = commonHeaders(),
+                    operation = "生成 cred/sign token",
+                )
+                requireApiSuccess(credResponse)
+                val data = credResponse["data"]?.jsonObject ?: error("凭证接口未返回 data")
+                val cred = data["cred"]?.jsonPrimitive?.content.orEmpty()
+                val signToken = data["token"]?.jsonPrimitive?.content.orEmpty()
+                check(cred.isNotBlank() && signToken.isNotBlank()) { "凭证接口缺少 cred/sign token" }
                 DevLogger.info("森空岛/登录", "凭证交换成功", taskId)
-                SklandSession(
-                    cred = data["cred"]!!.jsonPrimitive.content,
-                    signToken = data["token"]!!.jsonPrimitive.content,
+                SklandCredentialBundle(
+                    accessToken = token,
+                    cred = cred,
+                    signToken = signToken,
+                    userId = data["userId"]?.jsonPrimitive?.content,
+                    signTokenUpdatedAtEpochSeconds = Instant.now().epochSecond,
                 )
             }.onFailure {
                 DevLogger.error("森空岛/登录", it.message ?: "凭证交换失败", taskId)
+            }
+        }
+
+    suspend fun refreshSignToken(cred: String, taskId: String? = null): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder()
+                    .url(REFRESH_URL)
+                    .headers(commonHeaders().newBuilder().add("cred", cred).build())
+                    .get()
+                    .build()
+                val root = executeJson(request, "刷新 sign token")
+                requireApiSuccess(root)
+                root["data"]?.jsonObject?.get("token")?.jsonPrimitive?.content
+                    ?.takeIf(String::isNotBlank)
+                    ?: error("刷新接口未返回 sign token")
+            }.onSuccess {
+                DevLogger.info("森空岛/登录", "签名凭证刷新成功", taskId)
+            }.onFailure {
+                DevLogger.warn("森空岛/登录", "签名凭证刷新失败：${it.message}", taskId)
             }
         }
 
@@ -55,8 +117,8 @@ class SklandApi(
                     .headers(signedHeaders(BINDING_URL, "", session))
                     .get()
                     .build()
-                executeJson(request).also {
-                    check(apiCode(it) == 0) { apiMessage(it) }
+                executeJson(request, "读取绑定角色").also {
+                    requireApiSuccess(it)
                     DevLogger.info("森空岛/角色", "绑定角色查询成功", taskId)
                 }
             }.onFailure {
@@ -70,8 +132,15 @@ class SklandApi(
         session: SklandSession,
         taskId: String? = null,
     ): Result<JsonObject> {
-        val body = "{\"uid\": ${jsonString(uid)}, \"gameId\": ${jsonString(channelMasterId)}}"
-        return checkInPost(ARKNIGHTS_ATTENDANCE_URL, body, body, session, null, taskId)
+        val gameId = channelMasterId.toIntOrNull()?.toString() ?: jsonString(channelMasterId)
+        val body = "{\"uid\":${jsonString(uid)},\"gameId\":$gameId}"
+        return checkInPost(
+            endpoint = ARKNIGHTS_ATTENDANCE_URL,
+            body = body,
+            session = session,
+            taskId = taskId,
+            operation = "明日方舟签到",
+        )
     }
 
     suspend fun checkInEndfield(
@@ -79,45 +148,53 @@ class SklandApi(
         serverId: String,
         session: SklandSession,
         taskId: String? = null,
-    ): Result<JsonObject> = checkInPost(
-        endpoint = ENDFIELD_ATTENDANCE_URL,
-        body = "",
-        signingBody = "",
-        session = session,
-        extraHeaders = mapOf("sk-game-role" to "3_${roleId}_${serverId}"),
-        taskId = taskId,
-    )
+    ): Result<JsonObject> {
+        val gameRole = "3_${roleId}_${serverId}"
+        return checkInPost(
+            endpoint = ENDFIELD_ATTENDANCE_URL,
+            body = "",
+            session = session,
+            taskId = taskId,
+            operation = "终末地签到",
+            additionalHeaders = Headers.Builder()
+                .add("sk-game-role", gameRole)
+                .build(),
+        )
+    }
 
     private suspend fun checkInPost(
         endpoint: String,
         body: String,
-        signingBody: String,
         session: SklandSession,
-        extraHeaders: Map<String, String>?,
         taskId: String?,
+        operation: String,
+        additionalHeaders: Headers = Headers.headersOf(),
     ): Result<JsonObject> = withContext(Dispatchers.IO) {
         runCatching {
-            val headers = signedHeaders(endpoint, signingBody, session).newBuilder()
+            val headerBuilder = signedHeaders(endpoint, body, session).newBuilder()
                 .add("Content-Type", "application/json")
-                .apply { extraHeaders?.forEach { (name, value) -> add(name, value) } }
-                .build()
+            additionalHeaders.forEach { (name, value) -> headerBuilder.add(name, value) }
             val request = Request.Builder()
                 .url(endpoint)
-                .headers(headers)
+                .headers(headerBuilder.build())
                 .post(body.toRequestBody(JSON_MEDIA_TYPE))
                 .build()
-            executeJson(request).also {
-                DevLogger.info("森空岛/签到", "接口响应 code=${apiCode(it)}", taskId)
+            executeJson(
+                request = request,
+                operation = operation,
+                allowDuplicateAttendanceResponse = true,
+            ).also {
+                DevLogger.info("森空岛/签到", "$operation 接口响应 code=${apiCode(it)}", taskId)
             }
         }.onFailure {
-            DevLogger.error("森空岛/签到", it.message ?: "签到请求失败", taskId)
+            DevLogger.error("森空岛/签到", it.message ?: "$operation 请求失败", taskId)
         }
     }
 
     private fun signedHeaders(url: String, bodyOrQuery: String, session: SklandSession): Headers {
         val path = url.toHttpUrl().encodedPath
         val signed = SklandSigner.sign(path, bodyOrQuery, session.signToken, Instant.now().epochSecond)
-        return baseHeaders().newBuilder()
+        return commonHeaders().newBuilder()
             .add("cred", session.cred)
             .add("sign", signed.sign)
             .add("timestamp", signed.timestamp)
@@ -127,32 +204,66 @@ class SklandApi(
             .build()
     }
 
-    private fun postJson(url: String, body: String, headers: Headers): JsonObject {
+    private fun postJson(url: String, body: String, headers: Headers, operation: String): JsonObject {
         val request = Request.Builder()
             .url(url)
             .headers(headers)
             .post(body.toRequestBody(JSON_MEDIA_TYPE))
             .build()
-        return executeJson(request)
+        return executeJson(request, operation)
     }
 
-    private fun executeJson(request: Request): JsonObject = client.newCall(request).execute().use { response ->
-        check(response.isSuccessful) { "HTTP ${response.code}" }
-        val body = response.body ?: error("接口返回空内容")
-        val raw = if (response.header("Content-Encoding").equals("gzip", ignoreCase = true)) {
-            GZIPInputStream(body.byteStream()).bufferedReader(Charsets.UTF_8).use { it.readText() }
-        } else {
-            body.string()
+    private fun executeJson(
+        request: Request,
+        operation: String,
+        allowDuplicateAttendanceResponse: Boolean = false,
+    ): JsonObject = client.newCall(request).execute().use { response ->
+        val raw = response.body?.string().orEmpty()
+        val parsed = raw.takeIf(String::isNotBlank)?.let { body ->
+            runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
         }
-        check(raw.isNotBlank()) { "接口返回空内容" }
-        json.parseToJsonElement(raw).jsonObject
+        val serverMessage = parsed?.let(::apiMessage)
+            ?.takeUnless { it == "未知接口错误" }
+        if (response.code == 401) {
+            throw SklandAuthException(response.code, serverMessage ?: "HTTP 401")
+        }
+        if (response.code == 403) {
+            if (allowDuplicateAttendanceResponse && parsed?.let(::isAlreadyCheckedInResponse) == true) {
+                return@use parsed
+            }
+            val suffix = serverMessage?.let { "：$it" }.orEmpty()
+            throw SklandForbiddenException(
+                operation = operation,
+                message = "$operation 被森空岛拒绝（HTTP 403）$suffix",
+            )
+        }
+        check(response.isSuccessful) { "$operation 失败（HTTP ${response.code}）" }
+        check(raw.isNotBlank()) { "$operation 返回空内容" }
+        parsed ?: json.parseToJsonElement(raw).jsonObject
     }
 
-    private fun baseHeaders() = Headers.Builder()
-        .add("User-Agent", USER_AGENT)
-        .add("Accept-Encoding", "gzip")
-        .add("Connection", "close")
+    private fun commonHeaders(): Headers = Headers.Builder()
+        .add("User-Agent", SKLAND_USER_AGENT)
+        .add("Accept", "application/json")
         .build()
+
+    private fun requireApiSuccess(value: JsonObject) {
+        val code = apiCode(value)
+        if (code == 0) return
+        val message = apiMessage(value)
+        if (code == 10000 || code == 10002) throw SklandAuthException(code, message)
+        error(message)
+    }
+
+    private fun isAlreadyCheckedInResponse(value: JsonObject): Boolean {
+        val code = apiCode(value)
+        val message = apiMessage(value)
+        return code == 10001 ||
+            message.contains("请勿重复签到") ||
+            message.contains("重复签到") ||
+            message.contains("今日已签到") ||
+            message.contains("Please do not sign in again", ignoreCase = true)
+    }
 
     private fun apiCode(value: JsonObject): Int =
         value["status"]?.jsonPrimitive?.content?.toIntOrNull()
@@ -172,8 +283,10 @@ class SklandApi(
         private const val BINDING_URL = "https://zonai.skland.com/api/v1/game/player/binding"
         private const val CRED_CODE_URL = "https://zonai.skland.com/api/v1/user/auth/generate_cred_by_code"
         private const val GRANT_CODE_URL = "https://as.hypergryph.com/user/oauth2/v2/grant"
+        private const val REFRESH_URL = "https://zonai.skland.com/api/v1/auth/refresh"
         private const val APP_CODE = "4ca99fa6b56cc2ba"
-        private const val USER_AGENT =
+        private const val AUTH_PHASE_DELAY_MILLIS = 800L
+        internal const val SKLAND_USER_AGENT =
             "Skland/1.32.1 (com.hypergryph.skland; build:103201004; Android 33; ) Okhttp/4.11.0"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 

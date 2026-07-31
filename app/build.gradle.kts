@@ -5,6 +5,22 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+val debugKeystorePath = System.getenv("CHECKINTRACE_DEBUG_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+val debugKeystorePassword = System.getenv("CHECKINTRACE_DEBUG_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() }
+val debugKeyAlias = System.getenv("CHECKINTRACE_DEBUG_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+val debugKeyPassword = System.getenv("CHECKINTRACE_DEBUG_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+val debugSigningValues = listOf(
+    debugKeystorePath,
+    debugKeystorePassword,
+    debugKeyAlias,
+    debugKeyPassword,
+)
+val debugSigningConfigured = debugSigningValues.all { it != null }
+
+if (debugSigningValues.any { it != null } && !debugSigningConfigured) {
+    error("Stable debug signing is partially configured; all CHECKINTRACE_DEBUG signing variables are required")
+}
+
 val releaseSigningRequested = System.getenv("CHECKINTRACE_SIGN_RELEASE") == "true"
 val releaseKeystorePath = System.getenv("CHECKINTRACE_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
 val releaseKeystorePassword = System.getenv("CHECKINTRACE_KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() }
@@ -36,6 +52,14 @@ android {
     }
 
     signingConfigs {
+        if (debugSigningConfigured) {
+            create("stableDebug") {
+                storeFile = file(requireNotNull(debugKeystorePath))
+                storePassword = requireNotNull(debugKeystorePassword)
+                keyAlias = requireNotNull(debugKeyAlias)
+                keyPassword = requireNotNull(debugKeyPassword)
+            }
+        }
         if (releaseSigningConfigured) {
             create("release") {
                 storeFile = file(requireNotNull(releaseKeystorePath))
@@ -50,6 +74,9 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            if (debugSigningConfigured) {
+                signingConfig = signingConfigs.getByName("stableDebug")
+            }
         }
         release {
             isMinifyEnabled = true
