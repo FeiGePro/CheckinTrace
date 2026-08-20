@@ -85,6 +85,7 @@ private fun runStateColor(state: AutoCheckInRunState) = when (state) {
     AutoCheckInRunState.SUCCESS -> MaterialTheme.colorScheme.primary
     AutoCheckInRunState.RUNNING, AutoCheckInRunState.RETRY_SCHEDULED -> MaterialTheme.colorScheme.tertiary
     AutoCheckInRunState.FAILED, AutoCheckInRunState.ACTION_REQUIRED -> MaterialTheme.colorScheme.error
+    AutoCheckInRunState.INTERRUPTED -> MaterialTheme.colorScheme.error
 }
 
 private fun runStateLabel(state: AutoCheckInRunState): String = when (state) {
@@ -93,6 +94,7 @@ private fun runStateLabel(state: AutoCheckInRunState): String = when (state) {
     AutoCheckInRunState.RETRY_SCHEDULED -> "遇到临时错误，已安排重试"
     AutoCheckInRunState.FAILED -> "最近一次自动签到存在失败"
     AutoCheckInRunState.ACTION_REQUIRED -> "需要重新登录或完成平台验证"
+    AutoCheckInRunState.INTERRUPTED -> "上一次自动签到被中断"
 }
 
 private fun formatTimestamp(epochMillis: Long): String = TIMESTAMP_FORMATTER.format(Instant.ofEpochMilli(epochMillis))

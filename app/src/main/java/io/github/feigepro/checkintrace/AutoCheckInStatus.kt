@@ -13,6 +13,7 @@ enum class AutoCheckInRunState {
     RETRY_SCHEDULED,
     FAILED,
     ACTION_REQUIRED,
+    INTERRUPTED,
 }
 
 @Serializable
@@ -30,7 +31,9 @@ class AutoCheckInStatusStore(context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
 
     fun load(): AutoCheckInSnapshot? = preferences.getString(SNAPSHOT_KEY, null)?.let { encoded ->
-        runCatching { json.decodeFromString<AutoCheckInSnapshot>(encoded) }.getOrNull()
+        runCatching { json.decodeFromString<AutoCheckInSnapshot>(encoded) }
+            .getOrNull()
+            ?.let(::recoverStaleRunning)
     }
 
     fun save(snapshot: AutoCheckInSnapshot) {
@@ -39,9 +42,26 @@ class AutoCheckInStatusStore(context: Context) {
         }
     }
 
+    private fun recoverStaleRunning(snapshot: AutoCheckInSnapshot): AutoCheckInSnapshot {
+        if (snapshot.state != AutoCheckInRunState.RUNNING) return snapshot
+        if (System.currentTimeMillis() - snapshot.startedAtEpochMillis <= STALE_RUNNING_AFTER_MILLIS) {
+            return snapshot
+        }
+
+        val recovered = snapshot.copy(
+            state = AutoCheckInRunState.INTERRUPTED,
+            finishedAtEpochMillis = System.currentTimeMillis(),
+            lines = snapshot.lines + "上一次自动签到未正常结束，已标记为中断；下次任务会复用已记录的完成项",
+        )
+        // Persist the recovery so every subsequent screen/worker sees the same state.
+        preferences.edit().putString(SNAPSHOT_KEY, json.encodeToString(recovered)).commit()
+        return recovered
+    }
+
     private companion object {
         const val PREFERENCES_NAME = "auto_checkin_status"
         const val SNAPSHOT_KEY = "latest_snapshot"
+        private const val STALE_RUNNING_AFTER_MILLIS = 6 * 60 * 60 * 1000L
     }
 }
 
@@ -56,11 +76,11 @@ internal fun decideAutoCheckInCompletion(
     hasRetryableFailure: Boolean,
     runAttemptCount: Int,
 ): AutoCheckInCompletionDecision = when {
-    hasRetryableFailure && runAttemptCount < MAX_RETRY_ATTEMPTS ->
-        AutoCheckInCompletionDecision(AutoCheckInRunState.RETRY_SCHEDULED, shouldRetry = true)
-
     requiresAction ->
         AutoCheckInCompletionDecision(AutoCheckInRunState.ACTION_REQUIRED, shouldRetry = false)
+
+    hasRetryableFailure && runAttemptCount < MAX_RETRY_ATTEMPTS ->
+        AutoCheckInCompletionDecision(AutoCheckInRunState.RETRY_SCHEDULED, shouldRetry = true)
 
     hasFailures ->
         AutoCheckInCompletionDecision(AutoCheckInRunState.FAILED, shouldRetry = false)

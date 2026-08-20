@@ -1,5 +1,6 @@
 package io.github.feigepro.checkintrace.provider.mihoyo
 
+import android.content.Context
 import io.github.feigepro.checkintrace.logging.DevLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -11,13 +12,14 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.security.SecureRandom
 import java.time.Instant
-import java.util.UUID
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 data class MihoyoQrSession(
@@ -26,6 +28,43 @@ data class MihoyoQrSession(
     val deviceId: String,
     val deviceFp: String,
 )
+
+data class MihoyoDeviceIdentity(val deviceId: String, val deviceFp: String)
+
+/** Keeps the generated device context stable across QR re-logins on one install. */
+class MihoyoDeviceIdentityStore(context: Context) {
+    private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+    private val random = SecureRandom()
+
+    fun getOrCreate(): MihoyoDeviceIdentity {
+        synchronized(preferences) {
+            val existingId = preferences.getString(DEVICE_ID_KEY, null)
+            val existingFp = preferences.getString(DEVICE_FP_KEY, null)
+            if (!existingId.isNullOrBlank() && !existingFp.isNullOrBlank()) {
+                return MihoyoDeviceIdentity(existingId, existingFp)
+            }
+            val identity = MihoyoDeviceIdentity(
+                deviceId = java.util.UUID.randomUUID().toString().uppercase(),
+                deviceFp = buildString(13) {
+                    repeat(13) { append("0123456789abcdef"[random.nextInt(16)]) }
+                },
+            )
+            check(
+                preferences.edit()
+                    .putString(DEVICE_ID_KEY, identity.deviceId)
+                    .putString(DEVICE_FP_KEY, identity.deviceFp)
+                    .commit(),
+            ) { "保存米游社设备上下文失败" }
+            return identity
+        }
+    }
+
+    private companion object {
+        const val PREFERENCES_NAME = "mihoyo_device_identity"
+        const val DEVICE_ID_KEY = "device_id"
+        const val DEVICE_FP_KEY = "device_fp"
+    }
+}
 
 sealed interface MihoyoQrState {
     data object Waiting : MihoyoQrState
@@ -69,11 +108,17 @@ class MihoyoQrLoginClient(
     private val json: Json = Json { ignoreUnknownKeys = true },
     private val random: SecureRandom = SecureRandom(),
     private val deviceProfile: MihoyoDeviceProfile = MihoyoDeviceProfile.current(),
+    private val deviceIdentity: MihoyoDeviceIdentity = MihoyoDeviceIdentity(
+        deviceId = java.util.UUID.randomUUID().toString().uppercase(),
+        deviceFp = buildString(13) {
+            repeat(13) { append("0123456789abcdef"[SecureRandom().nextInt(16)]) }
+        },
+    ),
 ) {
     suspend fun createQr(taskId: String? = null): Result<MihoyoQrSession> = withContext(Dispatchers.IO) {
         runCatching {
-            val deviceId = UUID.randomUUID().toString().uppercase()
-            val deviceFp = randomHex(13)
+            val deviceId = deviceIdentity.deviceId
+            val deviceFp = deviceIdentity.deviceFp
             val body = "{}"
             val response = postJson(QR_FETCH_URL, body, qrHeaders(deviceId, deviceFp, body))
             ensureSuccess(response, "生成二维码失败")
@@ -101,7 +146,10 @@ class MihoyoQrLoginClient(
                 if (code != 0) {
                     val apiMessage = message(response)
                     DevLogger.warn("米游社/登录", "查询二维码状态失败 retcode=$code message=$apiMessage", taskId)
-                    return@runCatching MihoyoQrState.Failed("retcode=$code $apiMessage")
+                    if (code == QR_EXPIRED_RETCODE || isTerminalQrMessage(apiMessage)) {
+                        return@runCatching MihoyoQrState.Failed("retcode=$code $apiMessage")
+                    }
+                    throw IOException("二维码状态暂时不可用：retcode=$code $apiMessage")
                 }
                 val data = response["data"]!!.jsonObject
                 when (val status = data["status"]?.jsonPrimitive?.content.orEmpty()) {
@@ -112,8 +160,12 @@ class MihoyoQrLoginClient(
                     "Confirmed" -> {
                         val userInfo = data["user_info"]?.jsonObject ?: error("扫码结果缺少 user_info")
                         val tokens = data["tokens"]?.jsonArray.orEmpty()
-                        val stoken = tokens.firstOrNull()?.jsonObject
-                            ?.get("token")?.jsonPrimitive?.content.orEmpty()
+                        val tokenObjects = tokens.mapNotNull { it.jsonObjectOrNull() }
+                        val stoken = tokenObjects
+                            .firstOrNull { tokenName(it).contains("stoken") }
+                            ?.get("token")?.jsonPrimitive?.content
+                            ?: tokenObjects.singleOrNull()?.get("token")?.jsonPrimitive?.content
+                            ?: ""
                         val mid = userInfo["mid"]?.jsonPrimitive?.content.orEmpty()
                         val aid = userInfo["aid"]?.jsonPrimitive?.content.orEmpty()
                         check(stoken.isNotBlank() && mid.isNotBlank() && aid.isNotBlank()) {
@@ -173,7 +225,10 @@ class MihoyoQrLoginClient(
         mid: String,
         qrSession: MihoyoQrSession,
     ): String {
-        val query = "stoken=$stoken"
+        val requestUrl = url.toHttpUrl().newBuilder()
+            .addQueryParameter("stoken", stoken)
+            .build()
+        val query = requestUrl.encodedQuery.orEmpty()
         val ds = MihoyoDsSigner.x4(
             query = query,
             epochSeconds = Instant.now().epochSecond,
@@ -194,7 +249,7 @@ class MihoyoQrLoginClient(
             .add("Cookie", "mid=$mid;stoken=$stoken")
             .add("x-rpc-aigis", "")
             .build()
-        val request = Request.Builder().url("$url?$query").headers(headers).get().build()
+        val request = Request.Builder().url(requestUrl).headers(headers).get().build()
         val response = executeJson(request)
         ensureSuccess(response, "stoken 换 $resultKey 失败")
         return response["data"]?.jsonObject?.get(resultKey)?.jsonPrimitive?.content.orEmpty()
@@ -252,11 +307,17 @@ class MihoyoQrLoginClient(
     private fun message(value: JsonObject): String =
         value["message"]?.jsonPrimitive?.content ?: "未知接口错误"
 
+    private fun isTerminalQrMessage(message: String): Boolean =
+        listOf("过期", "失效", "超时", "拒绝", "已使用", "expired", "invalid", "denied")
+            .any { message.contains(it, ignoreCase = true) }
+
     private fun jsonString(value: String): String = json.encodeToString(String.serializer(), value)
 
-    private fun randomHex(length: Int): String = buildString(length) {
-        repeat(length) { append("0123456789abcdef"[random.nextInt(16)]) }
-    }
+    private fun tokenName(value: JsonObject): String =
+        value["name"]?.jsonPrimitive?.content.orEmpty().lowercase()
+
+    private fun kotlinx.serialization.json.JsonElement.jsonObjectOrNull(): JsonObject? =
+        runCatching { jsonObject }.getOrNull()
 
     companion object {
         private const val QR_FETCH_URL = "https://passport-api.mihoyo.com/account/ma-cn-passport/app/createQRLogin"
@@ -267,6 +328,7 @@ class MihoyoQrLoginClient(
         private const val PASSPORT_APP_VERSION = "2.90.1"
 
         private const val BBS_VERSION = "2.106.2"
+        private const val QR_EXPIRED_RETCODE = -106
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
         private fun defaultClient() = OkHttpClient.Builder()

@@ -35,6 +35,7 @@ class SklandLoginActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        DevLogger.initialize(applicationContext)
         title = "森空岛扫码登录"
         status = TextView(this).apply {
             text = "正在创建森空岛官方登录二维码……"
@@ -75,13 +76,22 @@ class SklandLoginActivity : Activity() {
             qrImage.setImageBitmap(makeQr(session.qrContent))
             status.text = "请用森空岛 App 扫码并确认登录\n同一台手机可截图后从扫码页相册识别"
             refreshButton.isEnabled = true
+            var transientFailures = 0
             repeat(50) {
                 delay(2_000)
                 if (!isActive) return@launch
-                when (val result = client.poll(session, taskId).getOrElse {
-                    showFailure("登录轮询失败：${it.message}")
-                    return@launch
-                }) {
+                val poll = client.poll(session, taskId)
+                if (poll.isFailure) {
+                    transientFailures += 1
+                    if (transientFailures >= QR_TRANSIENT_FAILURE_LIMIT) {
+                        showFailure("登录轮询失败：${poll.exceptionOrNull()?.message}")
+                        return@launch
+                    }
+                    status.text = "网络波动，继续查询（$transientFailures/$QR_TRANSIENT_FAILURE_LIMIT）"
+                    return@repeat
+                }
+                transientFailures = 0
+                when (val result = poll.getOrThrow()) {
                     SklandQrPollResult.Waiting -> Unit
                     is SklandQrPollResult.Confirmed -> {
                         status.text = "已确认，正在验证森空岛凭证……"
@@ -92,6 +102,10 @@ class SklandLoginActivity : Activity() {
                         DevLogger.info("森空岛/登录", "登录成功", taskId)
                         setResult(RESULT_OK, Intent().putExtra(EXTRA_TOKEN, result.token))
                         finish()
+                        return@launch
+                    }
+                    is SklandQrPollResult.Failed -> {
+                        showFailure("二维码失效：${result.message}")
                         return@launch
                     }
                 }
@@ -120,5 +134,8 @@ class SklandLoginActivity : Activity() {
         super.onDestroy()
     }
 
-    companion object { const val EXTRA_TOKEN = "skland_token" }
+    companion object {
+        const val EXTRA_TOKEN = "skland_token"
+        const val QR_TRANSIENT_FAILURE_LIMIT = 3
+    }
 }

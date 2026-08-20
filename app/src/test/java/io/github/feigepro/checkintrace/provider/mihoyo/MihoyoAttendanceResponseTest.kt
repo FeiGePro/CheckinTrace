@@ -39,5 +39,23 @@ class MihoyoAttendanceResponseTest {
         assertFalse(MihoyoAttendanceResponse.requiresHumanVerification(response("""{"data":{"success":0,"risk_code":0}}""")))
     }
 
+    @Test
+    fun missingStatusFieldsAreProtocolErrors() {
+        val error = runCatching {
+            MihoyoAttendanceResponse.status(response("""{"retcode":0,"data":{}}"""))
+        }.exceptionOrNull() as io.github.feigepro.checkintrace.provider.ProviderFailureException
+
+        assertEquals("PROTOCOL_ERROR", error.code)
+    }
+
+    @Test
+    fun missingSignPayloadIsProtocolError() {
+        val error = runCatching {
+            MihoyoAttendanceResponse.validateSignPayload(response("""{"retcode":0}"""))
+        }.exceptionOrNull() as io.github.feigepro.checkintrace.provider.ProviderFailureException
+
+        assertEquals("PROTOCOL_ERROR", error.code)
+    }
+
     private fun response(raw: String) = Json.parseToJsonElement(raw).jsonObject
 }

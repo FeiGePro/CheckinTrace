@@ -16,4 +16,12 @@ class LogRedactorTest {
         assertFalse(value.contains("cred123"))
         assertTrue(value.contains("[REDACTED]"))
     }
+
+    @Test
+    fun redactsBearerTokenAfterHeaderWhitespace() {
+        val value = LogRedactor.redact("Authorization: Bearer abc123")
+
+        assertFalse(value.contains("abc123"))
+        assertTrue(value.contains("[REDACTED]"))
+    }
 }

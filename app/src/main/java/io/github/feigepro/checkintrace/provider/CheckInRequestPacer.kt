@@ -6,6 +6,10 @@ import kotlinx.coroutines.delay
 class CheckInRequestPacer(
     private val minimumIntervalMillis: Long = DEFAULT_INTERVAL_MILLIS,
 ) {
+    init {
+        require(minimumIntervalMillis >= 0) { "minimumIntervalMillis must not be negative" }
+    }
+
     private var previousStartNanos: Long? = null
 
     suspend fun awaitTurn() {
@@ -18,8 +22,9 @@ class CheckInRequestPacer(
         previousStartNanos = System.nanoTime()
     }
 
-    private companion object {
-        const val DEFAULT_INTERVAL_MILLIS = 1_500L
+    internal companion object {
+        /** Fixed low-frequency interval; this is pacing, not anti-detection logic. */
+        const val DEFAULT_INTERVAL_MILLIS = 30_000L
         const val NANOS_PER_MILLI = 1_000_000L
     }
 }

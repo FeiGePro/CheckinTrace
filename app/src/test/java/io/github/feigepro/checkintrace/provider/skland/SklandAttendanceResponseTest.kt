@@ -26,6 +26,13 @@ class SklandAttendanceResponseTest {
     }
 
     @Test
+    fun successWithoutDataIsProtocolError() {
+        val result = parse("""{"code":0}""") as CheckInResult.Failure
+
+        assertEquals("PROTOCOL_ERROR", result.code)
+    }
+
+    @Test
     fun duplicateCodeIsAlreadyCheckedInEvenWithoutMessage() {
         val result = parse("""{"code":10001,"message":""}""")
 
@@ -44,6 +51,13 @@ class SklandAttendanceResponseTest {
         val result = parse("""{"message":"响应字段缺失"}""") as CheckInResult.Failure
 
         assertEquals("PROTOCOL_ERROR", result.code)
+    }
+
+    @Test
+    fun codeTakesPriorityWhenBothCodesArePresent() {
+        val result = parse("""{"status":0,"code":10002,"message":"凭证失效"}""") as CheckInResult.Failure
+
+        assertEquals("AUTH_REQUIRED", result.code)
     }
 
     @Test

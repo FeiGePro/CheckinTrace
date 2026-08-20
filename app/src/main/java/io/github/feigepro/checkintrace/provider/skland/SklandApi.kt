@@ -1,6 +1,8 @@
 package io.github.feigepro.checkintrace.provider.skland
 
+import android.os.Build
 import io.github.feigepro.checkintrace.logging.DevLogger
+import io.github.feigepro.checkintrace.provider.ProviderFailureException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.serializer
@@ -30,12 +32,12 @@ class SklandApi(
                 DevLogger.debug("森空岛/登录", "开始交换登录凭证", taskId)
                 val grantBody = "{\"appCode\":\"$APP_CODE\",\"token\":${jsonString(token)},\"type\":0}"
                 val grant = postJson(GRANT_CODE_URL, grantBody, baseHeaders())
-                check(apiCode(grant) == 0) { apiMessage(grant) }
+                requireApiSuccess(grant, "森空岛登录授权失败")
                 val code = grant["data"]!!.jsonObject["code"]!!.jsonPrimitive.content
 
                 val credBody = "{\"code\":${jsonString(code)},\"kind\":1}"
                 val credResponse = postJson(CRED_CODE_URL, credBody, baseHeaders())
-                check(apiCode(credResponse) == 0) { apiMessage(credResponse) }
+                requireApiSuccess(credResponse, "森空岛凭证交换失败")
                 val data = credResponse["data"]!!.jsonObject
                 DevLogger.info("森空岛/登录", "凭证交换成功", taskId)
                 SklandSession(
@@ -56,7 +58,7 @@ class SklandApi(
                     .get()
                     .build()
                 executeJson(request).also {
-                    check(apiCode(it) == 0) { apiMessage(it) }
+                    requireApiSuccess(it, "森空岛角色查询失败")
                     DevLogger.info("森空岛/角色", "绑定角色查询成功", taskId)
                 }
             }.onFailure {
@@ -137,15 +139,27 @@ class SklandApi(
     }
 
     private fun executeJson(request: Request): JsonObject = client.newCall(request).execute().use { response ->
-        check(response.isSuccessful) { "HTTP ${response.code}" }
         val body = response.body ?: error("接口返回空内容")
         val raw = if (response.header("Content-Encoding").equals("gzip", ignoreCase = true)) {
             GZIPInputStream(body.byteStream()).bufferedReader(Charsets.UTF_8).use { it.readText() }
         } else {
             body.string()
         }
-        check(raw.isNotBlank()) { "接口返回空内容" }
-        json.parseToJsonElement(raw).jsonObject
+        val parsed = raw.takeIf { it.isNotBlank() }
+            ?.let { runCatching { json.parseToJsonElement(it).jsonObject }.getOrNull() }
+        if (!response.isSuccessful) {
+            throw ProviderFailureException(
+                code = when (response.code) {
+                    401, 403 -> "AUTH_REQUIRED"
+                    429 -> "RATE_LIMITED"
+                    else -> "HTTP_${response.code}"
+                },
+                message = parsed?.let(::apiMessage) ?: "HTTP ${response.code}",
+                retryable = isRetryableHttpCode(response.code),
+            )
+        }
+        check(parsed != null) { "接口返回空内容或格式错误" }
+        parsed
     }
 
     private fun baseHeaders() = Headers.Builder()
@@ -155,9 +169,24 @@ class SklandApi(
         .build()
 
     private fun apiCode(value: JsonObject): Int =
-        value["status"]?.jsonPrimitive?.content?.toIntOrNull()
-            ?: value["code"]?.jsonPrimitive?.content?.toIntOrNull()
+        value["code"]?.jsonPrimitive?.content?.toIntOrNull()
+            ?: value["status"]?.jsonPrimitive?.content?.toIntOrNull()
             ?: Int.MIN_VALUE
+
+    private fun requireApiSuccess(value: JsonObject, prefix: String) {
+        val code = apiCode(value)
+        if (code == 0) return
+        val mappedCode = when (code) {
+            10000, 10002 -> "AUTH_REQUIRED"
+            10001 -> "ALREADY_CHECKED_IN"
+            else -> "API_$code"
+        }
+        throw ProviderFailureException(
+            mappedCode,
+            "$prefix：${apiMessage(value)}",
+            retryable = code == 408 || code == 425 || code == 429 || code in 500..599,
+        )
+    }
 
     private fun apiMessage(value: JsonObject): String =
         value["message"]?.jsonPrimitive?.content
@@ -166,6 +195,9 @@ class SklandApi(
 
     private fun jsonString(value: String): String = json.encodeToString(String.serializer(), value)
 
+    private fun isRetryableHttpCode(code: Int): Boolean =
+        code == 408 || code == 425 || code == 429 || code in 500..599
+
     companion object {
         const val ARKNIGHTS_ATTENDANCE_URL = "https://zonai.skland.com/api/v1/game/attendance"
         const val ENDFIELD_ATTENDANCE_URL = "https://zonai.skland.com/web/v1/game/endfield/attendance"
@@ -173,8 +205,8 @@ class SklandApi(
         private const val CRED_CODE_URL = "https://zonai.skland.com/api/v1/user/auth/generate_cred_by_code"
         private const val GRANT_CODE_URL = "https://as.hypergryph.com/user/oauth2/v2/grant"
         private const val APP_CODE = "4ca99fa6b56cc2ba"
-        private const val USER_AGENT =
-            "Skland/1.32.1 (com.hypergryph.skland; build:103201004; Android 33; ) Okhttp/4.11.0"
+        private val USER_AGENT =
+            "Skland/1.32.1 (com.hypergryph.skland; build:103201004; Android ${Build.VERSION.SDK_INT}; ) Okhttp/4.11.0"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
         private fun defaultClient() = OkHttpClient.Builder()

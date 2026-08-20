@@ -42,6 +42,19 @@ class AutoCheckInDecisionTest {
     }
 
     @Test
+    fun actionRequiredWinsOverAnotherProvidersTransientFailure() {
+        val decision = decideAutoCheckInCompletion(
+            hasFailures = true,
+            requiresAction = true,
+            hasRetryableFailure = true,
+            runAttemptCount = 0,
+        )
+
+        assertEquals(AutoCheckInRunState.ACTION_REQUIRED, decision.state)
+        assertFalse(decision.shouldRetry)
+    }
+
+    @Test
     fun cleanRunIsSuccessful() {
         val decision = decideAutoCheckInCompletion(
             hasFailures = false,

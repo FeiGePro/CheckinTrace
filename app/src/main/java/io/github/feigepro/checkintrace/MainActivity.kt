@@ -34,12 +34,16 @@ import com.google.zxing.qrcode.QRCodeWriter
 import io.github.feigepro.checkintrace.data.GameCatalog
 import io.github.feigepro.checkintrace.data.GameDefinition
 import io.github.feigepro.checkintrace.data.ProviderType
+import io.github.feigepro.checkintrace.logging.DevLogger
 import io.github.feigepro.checkintrace.ui.theme.SignInTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        AutoCheckInScheduler.ensureScheduled(applicationContext)
+        DevLogger.initialize(applicationContext)
+        // Re-arm on every explicit app launch as an OEM may remove the alarm
+        // while leaving the PendingIntent token present.
+        AutoCheckInScheduler.ensureScheduled(applicationContext, forceReschedule = true)
         requestNotificationPermissionOnce()
         setContent { SignInTheme { MainScreen() } }
     }

@@ -54,11 +54,11 @@ class EncryptedCredentialStore(context: Context) : CredentialStore {
         preferences.edit().clear().apply()
     }
 
-    private fun getOrCreateKey(): SecretKey {
+    private fun getOrCreateKey(): SecretKey = synchronized(KEY_LOCK) {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return@synchronized it }
 
-        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE).run {
+        KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE).run {
             init(
                 KeyGenParameterSpec.Builder(
                     KEY_ALIAS,
@@ -74,6 +74,7 @@ class EncryptedCredentialStore(context: Context) : CredentialStore {
     }
 
     private companion object {
+        val KEY_LOCK = Any()
         const val PREFERENCES_NAME = "encrypted_credentials"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val KEY_ALIAS = "checkintrace_credentials_v1"

@@ -21,4 +21,11 @@ class AutoCheckInSchedulerTest {
         val next = AutoCheckInScheduler.nextRun(now, DailyCheckInTime(6, 45))
         assertEquals(ZonedDateTime.of(2026, 7, 20, 6, 45, 0, 0, zone), next)
     }
+
+    @Test
+    fun lateExecutionStillTargetsNextCalendarOccurrence() {
+        val lateExecution = ZonedDateTime.of(2026, 7, 19, 14, 12, 37, 0, zone)
+        val next = AutoCheckInScheduler.nextRun(lateExecution, DailyCheckInTime(8, 30))
+        assertEquals(ZonedDateTime.of(2026, 7, 20, 8, 30, 0, 0, zone), next)
+    }
 }

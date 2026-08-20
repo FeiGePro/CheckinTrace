@@ -4,10 +4,10 @@ import io.github.feigepro.checkintrace.data.CheckInResult
 import io.github.feigepro.checkintrace.data.GameDefinition
 import io.github.feigepro.checkintrace.data.GameRole
 import io.github.feigepro.checkintrace.logging.DevLogger
+import io.github.feigepro.checkintrace.provider.ProviderFailureException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -20,6 +20,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.security.SecureRandom
 import java.time.Instant
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 data class MihoyoGameConfig(
@@ -63,7 +66,8 @@ class MihoyoAttendanceApi(
                 val request = Request.Builder().url(url).headers(baseHeaders()).get().build()
                 val response = executeJson(request)
                 ensureSuccess(response)
-                val list = response["data"]?.jsonObject?.get("list")?.jsonArray ?: JsonArray(emptyList())
+                val list = response["data"]?.jsonObject?.get("list")?.jsonArray
+                    ?: throw ProviderFailureException("PROTOCOL_ERROR", "角色响应缺少 list")
                 list.map { element ->
                     val role = element.jsonObject
                     GameRole(
@@ -132,6 +136,7 @@ class MihoyoAttendanceApi(
                 return@runCatching CheckInResult.AlreadyCheckedIn
             }
             ensureSuccess(response)
+            MihoyoAttendanceResponse.validateSignPayload(response)
             if (MihoyoAttendanceResponse.requiresHumanVerification(response)) {
                 DevLogger.warn("米游社/${game.displayName}", "触发平台验证，停止后续请求", taskId)
                 CheckInResult.Failure("CAPTCHA_REQUIRED", "平台要求人工验证")
@@ -140,8 +145,14 @@ class MihoyoAttendanceApi(
                 CheckInResult.Success("签到成功")
             }
         }.getOrElse { error ->
-            DevLogger.error("米游社/${game.displayName}", error.message ?: "签到失败", taskId)
-            CheckInResult.Failure("NETWORK_OR_PROTOCOL", error.message ?: "签到失败", true)
+            val failure = error as? ProviderFailureException
+            val message = error.message ?: "签到失败"
+            DevLogger.error("米游社/${game.displayName}", message, taskId)
+            CheckInResult.Failure(
+                code = failure?.code ?: "NETWORK_OR_PROTOCOL",
+                message = message,
+                retryable = failure?.retryable ?: isSafeToRetry(error),
+            )
         }
     }
 
@@ -172,20 +183,55 @@ class MihoyoAttendanceApi(
         .add("x-rpc-device_fp", credential.deviceFp)
         .add("x-rpc-device_model", credential.deviceModel?.takeIf { it.isNotBlank() } ?: deviceProfile.model)
         .add("x-rpc-device_name", credential.deviceName?.takeIf { it.isNotBlank() } ?: deviceProfile.name)
-        .add("x-rpc-sys_version", credential.systemVersion?.takeIf { it.isNotBlank() } ?: deviceProfile.systemVersion)
+        // The OS version can change after login; use the current Android value
+        // while retaining the stable credential/device identity.
+        .add("x-rpc-sys_version", deviceProfile.systemVersion)
         .add("Cookie", credential.cookieHeader())
         .build()
 
     private fun executeJson(request: Request): JsonObject = client.newCall(request).execute().use { response ->
         val body = response.body?.string().orEmpty()
-        check(response.isSuccessful) { "HTTP ${response.code}" }
-        check(body.isNotBlank()) { "接口返回空内容" }
-        json.parseToJsonElement(body).jsonObject
+        val parsed = body.takeIf { it.isNotBlank() }
+            ?.let { runCatching { json.parseToJsonElement(it).jsonObject }.getOrNull() }
+        if (!response.isSuccessful) {
+            val code = parsed?.let(::failureCode) ?: when (response.code) {
+                401, 403 -> "AUTH_REQUIRED"
+                429 -> "RATE_LIMITED"
+                else -> "HTTP_${response.code}"
+            }
+            throw ProviderFailureException(
+                code = code,
+                message = parsed?.get("message")?.jsonPrimitive?.content
+                    ?: "HTTP ${response.code}",
+                retryable = isRetryableHttpCode(response.code),
+            )
+        }
+        check(parsed != null) { "接口返回空内容或格式错误" }
+        return parsed
     }
 
     private fun ensureSuccess(response: JsonObject) {
+        if (MihoyoAttendanceResponse.requiresHumanVerification(response)) {
+            throw ProviderFailureException("CAPTCHA_REQUIRED", "平台要求人工验证")
+        }
         val code = MihoyoAttendanceResponse.retcode(response)
-        if (code != 0) error(response.string("message") ?: "接口错误 retcode=$code")
+        if (code != 0) {
+            val message = response.string("message") ?: "接口错误 retcode=$code"
+            throw ProviderFailureException(failureCode(response), message)
+        }
+    }
+
+    private fun failureCode(response: JsonObject): String {
+        if (MihoyoAttendanceResponse.requiresHumanVerification(response)) return "CAPTCHA_REQUIRED"
+        val message = response.string("message").orEmpty().lowercase()
+        return if (
+            message.contains("登录") || message.contains("凭证") || message.contains("token") ||
+            message.contains("cookie") || message.contains("stoken") || message.contains("auth")
+        ) {
+            "AUTH_REQUIRED"
+        } else {
+            "API_${MihoyoAttendanceResponse.retcode(response)}"
+        }
     }
 
     private fun requireConfig(game: GameDefinition): MihoyoGameConfig =
@@ -199,6 +245,18 @@ class MihoyoAttendanceApi(
     }
 
     private fun escape(value: String): String = value.replace("\\", "\\\\").replace("\"", "\\\"")
+
+    private fun isSafeToRetry(error: Throwable): Boolean = when (error) {
+        is UnknownHostException,
+        is ConnectException,
+        is NoRouteToHostException,
+        -> true
+
+        else -> false
+    }
+
+    private fun isRetryableHttpCode(code: Int): Boolean =
+        code == 408 || code == 425 || code == 429 || code in 500..599
 
     companion object {
         private const val ROLE_URL = "https://api-takumi.mihoyo.com/binding/api/getUserGameRolesByCookie"

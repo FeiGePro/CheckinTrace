@@ -3,12 +3,12 @@ package io.github.feigepro.checkintrace
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import io.github.feigepro.checkintrace.data.CheckInResult
 import io.github.feigepro.checkintrace.data.GameCatalog
 import io.github.feigepro.checkintrace.data.ProviderType
 import io.github.feigepro.checkintrace.logging.DevLogFormatter
 import io.github.feigepro.checkintrace.logging.DevLogger
-import io.github.feigepro.checkintrace.provider.CheckInRequestPacer
+import io.github.feigepro.checkintrace.logging.LogRedactor
+import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoDeviceIdentityStore
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoProvider
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrLoginClient
 import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrSession
@@ -16,11 +16,15 @@ import io.github.feigepro.checkintrace.provider.mihoyo.MihoyoQrState
 import io.github.feigepro.checkintrace.provider.skland.SklandProvider
 import io.github.feigepro.checkintrace.security.CredentialRepository
 import io.github.feigepro.checkintrace.security.EncryptedCredentialStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 
 data class MainUiState(
     val selected: Set<String> = GameCatalog.builtIn.filter { it.enabledByDefault }.mapTo(mutableSetOf()) { it.id },
@@ -38,7 +42,11 @@ data class MainUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = CredentialRepository(EncryptedCredentialStore(application))
     private val autoCheckInStatusStore = AutoCheckInStatusStore(application)
-    private val qrClient = MihoyoQrLoginClient()
+    private val qrClient = MihoyoQrLoginClient(
+        deviceIdentity = MihoyoDeviceIdentityStore(application).getOrCreate(),
+    )
+    private var mihoyoLoginJob: kotlinx.coroutines.Job? = null
+    private var mihoyoLoginGeneration = 0L
     private val preferences = application.getSharedPreferences("ui_settings", 0)
     private val initialSchedule = AutoCheckInScheduler.currentTime(application)
     private val _state = MutableStateFlow(
@@ -58,7 +66,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val selected = _state.value.selected.toMutableSet().apply {
             if (checked) add(id) else remove(id)
         }
-        preferences.edit().putStringSet("selected_games", selected).apply()
+        if (!preferences.edit().putStringSet("selected_games", selected).commit()) {
+            DevLogger.error("设置", "保存游戏选择失败")
+            return
+        }
         _state.value = _state.value.copy(selected = selected)
     }
 
@@ -73,25 +84,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun beginMihoyoLogin() {
         if (_state.value.busy) return
-        viewModelScope.launch {
+        mihoyoLoginJob?.cancel()
+        val generation = ++mihoyoLoginGeneration
+        mihoyoLoginJob = viewModelScope.launch {
             _state.value = _state.value.copy(busy = true, qrStatus = "正在创建二维码……")
-            val session = qrClient.createQr().getOrElse {
-                _state.value = _state.value.copy(busy = false, qrStatus = "二维码创建失败：${it.message}")
-                return@launch
+            try {
+                val session = qrClient.createQr().getOrElse {
+                    _state.value = _state.value.copy(qrStatus = "二维码创建失败：${it.message}")
+                    return@launch
+                }
+                if (generation != mihoyoLoginGeneration) return@launch
+                _state.value = _state.value.copy(qrSession = session, qrStatus = "请使用米游社扫描并确认")
+                pollMihoyoQr(session, generation)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                val message = LogRedactor.redact(error.message ?: error.javaClass.simpleName)
+                DevLogger.error("米游社/登录", message)
+                _state.value = _state.value.copy(qrSession = null, qrStatus = "登录流程异常：$message")
+            } finally {
+                if (generation == mihoyoLoginGeneration) {
+                    _state.value = _state.value.copy(busy = false)
+                    mihoyoLoginJob = null
+                }
             }
-            _state.value = _state.value.copy(busy = false, qrSession = session, qrStatus = "请使用米游社扫描并确认")
-            pollMihoyoQr(session)
         }
     }
 
     fun cancelMihoyoLogin() {
-        _state.value = _state.value.copy(qrSession = null, qrStatus = null)
+        mihoyoLoginGeneration++
+        mihoyoLoginJob?.cancel()
+        mihoyoLoginJob = null
+        _state.value = _state.value.copy(busy = false, qrSession = null, qrStatus = null)
     }
 
-    private suspend fun pollMihoyoQr(session: MihoyoQrSession) {
+    private suspend fun pollMihoyoQr(session: MihoyoQrSession, generation: Long) {
+        var transientFailures = 0
         repeat(90) {
-            if (_state.value.qrSession?.ticket != session.ticket) return
-            when (val result = qrClient.queryQr(session).getOrElse { MihoyoQrState.Failed(it.message ?: "查询失败") }) {
+            if (generation != mihoyoLoginGeneration || _state.value.qrSession?.ticket != session.ticket) return
+            val query = qrClient.queryQr(session)
+            if (generation != mihoyoLoginGeneration || _state.value.qrSession?.ticket != session.ticket) return
+            if (query.isFailure) {
+                transientFailures += 1
+                if (transientFailures >= QR_TRANSIENT_FAILURE_LIMIT) {
+                    _state.value = _state.value.copy(qrSession = null, qrStatus = "二维码查询失败：${query.exceptionOrNull()?.message}")
+                    return
+                }
+                _state.value = _state.value.copy(qrStatus = "网络波动，继续查询（$transientFailures/$QR_TRANSIENT_FAILURE_LIMIT）")
+                delay(QR_POLL_INTERVAL_MILLIS)
+                return@repeat
+            }
+            transientFailures = 0
+            when (val result = query.getOrThrow()) {
                 MihoyoQrState.Waiting -> _state.value = _state.value.copy(qrStatus = "等待扫码……")
                 MihoyoQrState.Scanned -> _state.value = _state.value.copy(qrStatus = "已扫码，请在米游社中确认")
                 is MihoyoQrState.Confirmed -> {
@@ -100,7 +144,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         _state.value = _state.value.copy(qrSession = null, qrStatus = "登录失败：${it.message}")
                         return
                     }
-                    repository.saveMihoyo(DEFAULT_ACCOUNT, credential)
+                    if (generation != mihoyoLoginGeneration || _state.value.qrSession?.ticket != session.ticket) return
+                    runCatching { repository.saveMihoyo(DEFAULT_ACCOUNT, credential) }.getOrElse {
+                        throw IllegalStateException("登录凭证保存失败", it)
+                    }
                     _state.value = _state.value.copy(mihoyoLoggedIn = true, qrSession = null, qrStatus = "米游社登录成功")
                     return
                 }
@@ -109,7 +156,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return
                 }
             }
-            delay(2_000)
+            delay(QR_POLL_INTERVAL_MILLIS)
         }
         _state.value = _state.value.copy(qrSession = null, qrStatus = "二维码已超时，请重新获取")
     }
@@ -123,57 +170,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun runSelectedCheckIns() {
         if (_state.value.busy) return
         viewModelScope.launch {
+            if (!acquireCheckInExecutionLock(MANUAL_LOCK_WAIT_MILLIS)) {
+                _state.value = _state.value.copy(output = listOf("已有签到任务正在执行，请稍后再试"))
+                return@launch
+            }
             val taskId = DevLogger.newTaskId()
             val lines = mutableListOf<String>()
             _state.value = _state.value.copy(busy = true, output = listOf("开始检查已选游戏……"))
-            val games = GameCatalog.builtIn.filter { it.id in _state.value.selected }
-            val providers = mapOf(
-                ProviderType.MIHOYO to repository.loadMihoyo(DEFAULT_ACCOUNT)?.let(::MihoyoProvider),
-                ProviderType.SKLAND to repository.loadSklandToken(DEFAULT_ACCOUNT)?.let(::SklandProvider),
-            )
-            val requestPacer = CheckInRequestPacer()
-            for ((providerType, providerGames) in games.groupBy { it.provider }) {
-                val provider = providers[providerType]
-                if (provider == null) {
-                    lines += "${providerName(providerType)}：尚未登录"
-                    continue
-                }
-                val validation = provider.validateCredential()
-                if (validation.isFailure) {
-                    lines += "${providerName(providerType)}：登录验证失败（${validation.exceptionOrNull()?.message}）"
-                    continue
-                }
-                var stopProvider = false
-                for (game in providerGames) {
-                    if (stopProvider) break
-                    val roleResult = provider.getRoles(game)
-                    if (roleResult.isFailure) {
-                        lines += "${game.displayName}：读取角色失败（${roleResult.exceptionOrNull()?.message}）"
-                        continue
-                    }
-                    val roles = roleResult.getOrThrow()
-                    if (roles.isEmpty()) lines += "${game.displayName}：没有找到绑定角色"
-                    for (role in roles) {
-                        val label = "${game.displayName} · ${role.nickname}"
-                        requestPacer.awaitTurn()
-                        when (val result = provider.checkIn(game, role)) {
-                            is CheckInResult.Success -> lines += "$label：${result.message}"
-                            CheckInResult.AlreadyCheckedIn -> lines += "$label：今日已签到"
-                            is CheckInResult.Failure -> {
-                                lines += "$label：失败（${result.message}）"
-                                if (result.code == "CAPTCHA_REQUIRED") {
-                                    lines += "检测到人工验证要求，已停止米游社后续请求"
-                                    stopProvider = true
-                                    break
-                                }
-                            }
+            try {
+                val games = GameCatalog.builtIn.filter { it.id in _state.value.selected }
+                val providers = mapOf(
+                    ProviderType.MIHOYO to repository.loadMihoyo(DEFAULT_ACCOUNT)?.let(::MihoyoProvider),
+                    ProviderType.SKLAND to repository.loadSklandToken(DEFAULT_ACCOUNT)?.let(::SklandProvider),
+                )
+                if (games.isEmpty()) lines += "没有选择游戏"
+                val outcomes = supervisorScope {
+                    games.groupBy { it.provider }.map { (type, providerGames) ->
+                        async {
+                            executeProviderCheckInsSafely(
+                                type = type,
+                                providerGames = providerGames,
+                                provider = providers[type],
+                                previouslyCompletedRoleKeys = emptySet(),
+                                skipPreviouslyCompleted = false,
+                                taskId = taskId,
+                            )
                         }
-                        _state.value = _state.value.copy(output = lines.toList())
-                    }
+                    }.awaitAll()
                 }
+                outcomes.forEach { lines += it.lines }
+                DevLogger.info("任务", "签到测试结束，共 ${lines.size} 条结果", taskId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                val message = LogRedactor.redact(error.message ?: error.javaClass.simpleName)
+                lines += "任务异常（$message）"
+                DevLogger.error("任务", message, taskId)
+            } finally {
+                DevLogger.flush()
+                _state.value = _state.value.copy(
+                    busy = false,
+                    output = lines.ifEmpty { listOf("没有选择游戏") },
+                )
+                CheckInExecutionLock.mutex.unlock()
             }
-            DevLogger.info("任务", "签到测试结束，共 ${lines.size} 条结果", taskId)
-            _state.value = _state.value.copy(busy = false, output = lines.ifEmpty { listOf("没有选择游戏") })
         }
     }
 
@@ -183,7 +223,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    private fun providerName(type: ProviderType) = if (type == ProviderType.MIHOYO) "米游社" else "森空岛"
+    override fun onCleared() {
+        mihoyoLoginGeneration++
+        mihoyoLoginJob?.cancel()
+        super.onCleared()
+    }
 
-    private companion object { const val DEFAULT_ACCOUNT = "default" }
+    private companion object {
+        const val DEFAULT_ACCOUNT = "default"
+        const val QR_POLL_INTERVAL_MILLIS = 2_000L
+        const val QR_TRANSIENT_FAILURE_LIMIT = 3
+        const val MANUAL_LOCK_WAIT_MILLIS = 5_000L
+    }
 }
