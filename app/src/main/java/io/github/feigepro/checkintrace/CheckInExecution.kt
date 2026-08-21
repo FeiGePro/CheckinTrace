@@ -10,6 +10,7 @@ import io.github.feigepro.checkintrace.provider.CheckInRequestPacer
 import io.github.feigepro.checkintrace.provider.ProviderFailureException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import kotlinx.coroutines.CancellationException
@@ -217,6 +218,7 @@ internal fun isTransientError(error: Throwable?): Boolean {
         is UnknownHostException,
         is ConnectException,
         is NoRouteToHostException,
+        is SocketException,
         is SocketTimeoutException,
         -> true
 

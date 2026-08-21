@@ -3,7 +3,10 @@ package io.github.feigepro.checkintrace.provider.skland
 import android.os.Build
 import io.github.feigepro.checkintrace.logging.DevLogger
 import io.github.feigepro.checkintrace.provider.ProviderFailureException
+import java.io.IOException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -52,12 +55,17 @@ class SklandApi(
     suspend fun getBindings(session: SklandSession, taskId: String? = null): Result<JsonObject> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val request = Request.Builder()
-                    .url(BINDING_URL)
-                    .headers(signedHeaders(BINDING_URL, "", session))
-                    .get()
-                    .build()
-                executeJson(request).also {
+                executeJsonWithRetry(
+                    requestFactory = {
+                        Request.Builder()
+                            .url(BINDING_URL)
+                            // Rebuild the signature on every attempt so a
+                            // delayed retry never sends an expired timestamp.
+                            .headers(signedHeaders(BINDING_URL, "", session))
+                            .get()
+                            .build()
+                    },
+                ).also {
                     requireApiSuccess(it, "森空岛角色查询失败")
                     DevLogger.info("森空岛/角色", "绑定角色查询成功", taskId)
                 }
@@ -138,6 +146,28 @@ class SklandApi(
         return executeJson(request)
     }
 
+    private suspend fun executeJsonWithRetry(requestFactory: () -> Request): JsonObject {
+        var lastError: Exception? = null
+        repeat(BINDING_MAX_ATTEMPTS) { attempt ->
+            try {
+                return executeJson(requestFactory())
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                lastError = error
+                val retryable = error is IOException ||
+                    (error as? ProviderFailureException)?.retryable == true
+                if (!retryable || attempt == BINDING_MAX_ATTEMPTS - 1) throw error
+                DevLogger.warn(
+                    "森空岛/角色",
+                    "角色查询暂时失败，${BINDING_RETRY_DELAYS_MILLIS[attempt]}ms 后重试（${error.message ?: error.javaClass.simpleName}）",
+                )
+                delay(BINDING_RETRY_DELAYS_MILLIS[attempt])
+            }
+        }
+        throw lastError ?: IllegalStateException("角色查询失败")
+    }
+
     private fun executeJson(request: Request): JsonObject = client.newCall(request).execute().use { response ->
         val body = response.body ?: error("接口返回空内容")
         val raw = if (response.header("Content-Encoding").equals("gzip", ignoreCase = true)) {
@@ -208,6 +238,8 @@ class SklandApi(
         private val USER_AGENT =
             "Skland/1.32.1 (com.hypergryph.skland; build:103201004; Android ${Build.VERSION.SDK_INT}; ) Okhttp/4.11.0"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+        private const val BINDING_MAX_ATTEMPTS = 3
+        private val BINDING_RETRY_DELAYS_MILLIS = longArrayOf(500L, 1_000L)
 
         private fun defaultClient() = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)

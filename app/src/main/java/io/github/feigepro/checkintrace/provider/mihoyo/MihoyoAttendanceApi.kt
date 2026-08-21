@@ -22,6 +22,7 @@ import java.security.SecureRandom
 import java.time.Instant
 import java.net.ConnectException
 import java.net.NoRouteToHostException
+import java.net.SocketException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
@@ -66,8 +67,11 @@ class MihoyoAttendanceApi(
                 val request = Request.Builder().url(url).headers(baseHeaders()).get().build()
                 val response = executeJson(request)
                 ensureSuccess(response)
+                // A successful role response can omit the list for an account
+                // with no binding. Treat it as an empty list, as older client
+                // versions did, instead of stopping every other game.
                 val list = response["data"]?.jsonObject?.get("list")?.jsonArray
-                    ?: throw ProviderFailureException("PROTOCOL_ERROR", "角色响应缺少 list")
+                    ?: kotlinx.serialization.json.JsonArray(emptyList())
                 list.map { element ->
                     val role = element.jsonObject
                     GameRole(
@@ -136,7 +140,6 @@ class MihoyoAttendanceApi(
                 return@runCatching CheckInResult.AlreadyCheckedIn
             }
             ensureSuccess(response)
-            MihoyoAttendanceResponse.validateSignPayload(response)
             if (MihoyoAttendanceResponse.requiresHumanVerification(response)) {
                 DevLogger.warn("米游社/${game.displayName}", "触发平台验证，停止后续请求", taskId)
                 CheckInResult.Failure("CAPTCHA_REQUIRED", "平台要求人工验证")
@@ -250,6 +253,7 @@ class MihoyoAttendanceApi(
         is UnknownHostException,
         is ConnectException,
         is NoRouteToHostException,
+        is SocketException,
         -> true
 
         else -> false

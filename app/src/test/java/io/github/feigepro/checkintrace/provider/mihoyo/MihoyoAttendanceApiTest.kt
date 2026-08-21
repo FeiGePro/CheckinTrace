@@ -115,4 +115,41 @@ class MihoyoAttendanceApiTest {
         assertEquals("CAPTCHA_REQUIRED", result.code)
         assertTrue(!result.retryable)
     }
+
+    @Test
+    fun successfulSignWithOptionalFieldsOmittedIsAccepted() = runTest {
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            val raw = if (request.url.encodedPath.endsWith("/info")) {
+                """{"retcode":0,"message":"OK","data":{}}"""
+            } else {
+                """{"retcode":0,"message":"OK","data":{}}"""
+            }
+            Response.Builder()
+                .request(request)
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(raw.toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
+        val credential = MihoyoCredentialBundle(
+            accountId = "10001",
+            mid = "mid-test",
+            stoken = "stoken-test",
+            ltoken = null,
+            cookieToken = "cookie-test",
+            deviceId = "REAL-DEVICE-ID",
+            deviceFp = "abcdef1234567",
+        )
+        val api = MihoyoAttendanceApi(
+            credential = credential,
+            client = client,
+            deviceProfile = MihoyoDeviceProfile("fallback", "fallback", "0"),
+        )
+        val game = GameDefinition("mihoyo.genshin", "原神", ProviderType.MIHOYO, "hk4e_cn")
+        val role = GameRole(game.id, "123456789", "旅行者", extra = mapOf("region" to "cn_gf01"))
+
+        assertEquals(CheckInResult.Success("签到成功"), api.checkIn(game, role))
+    }
 }

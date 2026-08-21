@@ -7,6 +7,7 @@ import io.github.feigepro.checkintrace.provider.CheckInProvider
 import io.github.feigepro.checkintrace.provider.ProviderFailureException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
+import java.net.SocketException
 import java.net.UnknownHostException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -171,6 +172,7 @@ internal object SklandCheckInFailurePolicy {
         is UnknownHostException,
         is ConnectException,
         is NoRouteToHostException -> true
+        is SocketException -> true
 
         else -> false
     }

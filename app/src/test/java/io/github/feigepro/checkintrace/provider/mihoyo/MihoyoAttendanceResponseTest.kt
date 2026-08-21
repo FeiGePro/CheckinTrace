@@ -40,21 +40,21 @@ class MihoyoAttendanceResponseTest {
     }
 
     @Test
-    fun missingStatusFieldsAreProtocolErrors() {
-        val error = runCatching {
-            MihoyoAttendanceResponse.status(response("""{"retcode":0,"data":{}}"""))
-        }.exceptionOrNull() as io.github.feigepro.checkintrace.provider.ProviderFailureException
+    fun missingStatusFieldsRemainCompatibleWithSuccessfulInfoResponses() {
+        val status = MihoyoAttendanceResponse.status(response("""{"retcode":0,"data":{}}"""))
 
-        assertEquals("PROTOCOL_ERROR", error.code)
+        assertFalse(status.isSigned)
+        assertFalse(status.firstBind)
     }
 
     @Test
-    fun missingSignPayloadIsProtocolError() {
-        val error = runCatching {
-            MihoyoAttendanceResponse.validateSignPayload(response("""{"retcode":0}"""))
-        }.exceptionOrNull() as io.github.feigepro.checkintrace.provider.ProviderFailureException
+    fun topLevelStatusFieldsAreAcceptedAsFallback() {
+        val status = MihoyoAttendanceResponse.status(
+            response("""{"retcode":0,"is_sign":1,"first_bind":0}"""),
+        )
 
-        assertEquals("PROTOCOL_ERROR", error.code)
+        assertTrue(status.isSigned)
+        assertFalse(status.firstBind)
     }
 
     private fun response(raw: String) = Json.parseToJsonElement(raw).jsonObject

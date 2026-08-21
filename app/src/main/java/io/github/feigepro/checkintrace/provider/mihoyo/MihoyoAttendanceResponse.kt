@@ -1,8 +1,8 @@
 package io.github.feigepro.checkintrace.provider.mihoyo
 
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
-import io.github.feigepro.checkintrace.provider.ProviderFailureException
 
 data class MihoyoAttendanceStatus(
     val isSigned: Boolean,
@@ -11,14 +11,19 @@ data class MihoyoAttendanceStatus(
 
 internal object MihoyoAttendanceResponse {
     fun status(response: JsonObject): MihoyoAttendanceStatus {
+        // The info endpoint has returned a smaller data object for some
+        // activities and account states. These fields are optional in the
+        // wire response; a missing value means "not reported", not a broken
+        // login. Keep the historical fallback so the sign request can still
+        // confirm the authoritative result from the sign endpoint.
         val data = response["data"] as? JsonObject
-            ?: throw ProviderFailureException("PROTOCOL_ERROR", "签到状态响应缺少 data")
-        if (!data.containsKey("is_sign") || !data.containsKey("first_bind")) {
-            throw ProviderFailureException("PROTOCOL_ERROR", "签到状态响应缺少 is_sign/first_bind")
-        }
         return MihoyoAttendanceStatus(
-            isSigned = data.boolean("is_sign"),
-            firstBind = data.boolean("first_bind"),
+            isSigned = data.booleanOrNull("is_sign")
+                ?: response.booleanOrNull("is_sign")
+                ?: false,
+            firstBind = data.booleanOrNull("first_bind")
+                ?: response.booleanOrNull("first_bind")
+                ?: false,
         )
     }
 
@@ -32,20 +37,12 @@ internal object MihoyoAttendanceResponse {
         return success == 1 || riskCode != 0
     }
 
-    fun validateSignPayload(response: JsonObject) {
-        val data = response["data"] as? JsonObject
-            ?: throw ProviderFailureException("PROTOCOL_ERROR", "签到响应缺少 data")
-        if (
-            !data.containsKey("success") &&
-            !data.containsKey("risk_code") &&
-            !data.containsKey("is_risk")
-        ) {
-            throw ProviderFailureException("PROTOCOL_ERROR", "签到响应缺少结果字段")
+    private fun JsonObject?.booleanOrNull(key: String): Boolean? {
+        val value = this?.get(key) as? JsonPrimitive ?: return null
+        return when (value.content.lowercase()) {
+            "true", "1" -> true
+            "false", "0" -> false
+            else -> null
         }
-    }
-
-    private fun JsonObject?.boolean(key: String): Boolean {
-        val value = this?.get(key)?.jsonPrimitive?.content ?: return false
-        return value.equals("true", ignoreCase = true) || value == "1"
     }
 }
